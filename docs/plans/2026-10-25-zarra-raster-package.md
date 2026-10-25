@@ -577,7 +577,7 @@ First implement `LevelMeta::from_json` as a public associated function with sign
 2. Create `tempfile::Builder::tempdir_in(parent)` and child `work`/`store` paths.
 3. Probe and emit every level into `work/<L>`.
 4. Create `store` once. Move `work/<L>/data` to `store/<L>` with `fs::rename`; this publishes only pixel-array metadata/chunks and leaves group/X/Y/warp artifacts in `work`.
-5. Read `work/zarr.json`, require a v3 group, insert `attributes.zarra = manifest.to_value()?`, and write `store/zarr.json` with `create_new(true)`.
+5. Read `work/0/zarr.json` (each `gdal_translate` writes its group at `work/<L>`, not at `work/`), require a v3 group, insert `attributes.zarra = manifest.to_value()?`, and write `store/zarr.json` with `create_new(true)`.
 6. Validate the manifest and call `LevelMeta::from_json` on every published level's array metadata, using the shared validator in `level.rs`; count regular files recursively using `std::fs::read_dir`, recheck output absence, and rename `store` to the requested output.
 7. Let the temporary parent clean failures/intermediates. Return `BuildReport`; do not add a force flag or upload code.
 

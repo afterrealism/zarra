@@ -190,7 +190,7 @@ The store is built as `store` inside a fresh sibling temporary directory. After 
 Every opened level must satisfy all of the following:
 
 - Zarr v3 `array`, regular chunk grid, default chunk-key encoding with `/` separator, no storage transformers.
-- Two dimensions for one band or three for multiple bands; positive sizes; the 3D band shape matches the root manifest.
+- Two dimensions `[H,W]` or three `[bands,H,W]`; positive sizes. One-band arrays may use either form for read compatibility, including the independent `[1,64,64]` fixture; conversion writes 2D for one band. Every 3D band shape matches the root manifest.
 - One of the eight profile dtypes, little-endian `bytes` encoding, and the root manifest's dtype.
 - One outer `sharding_indexed` codec. Inner codecs are `bytes` followed by optional `zstd`; no other array/byte codec is accepted.
 - Shard index codecs are `bytes` plus `crc32c`; index location `end` (the writer's layout) or `start` (accepted by the reader).

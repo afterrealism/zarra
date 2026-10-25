@@ -11,8 +11,12 @@
 )]
 #![warn(missing_docs)]
 
+pub mod create;
 pub mod error;
+pub mod level;
 pub mod manifest;
 
+pub use create::{convert, BuildReport};
 pub use error::{Error, Result};
+pub use level::LevelMeta;
 pub use manifest::{Channels, DType, LevelOffset, Nodata, RasterManifest, TileEncoding};

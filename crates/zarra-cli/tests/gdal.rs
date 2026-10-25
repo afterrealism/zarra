@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
 use serde_json::Value;
+use zarra::RasterStore;
 
 const SAMPLE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/data/sample.tif");
 const FIXTURE_DATA: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/data");
@@ -94,6 +95,50 @@ fn validate_store(output: &Path, bands: usize) -> TestResult {
                 .ok_or("invalid test shape")?
         );
     }
+
+    let mut store = RasterStore::open(output)?;
+    {
+        let opened = store.manifest();
+        assert_eq!(opened.bands, bands);
+        assert_eq!(opened.tile_size, 256);
+        assert_eq!(opened.maxzoom, u8::try_from(maxzoom)?);
+    }
+    for z in 0..=u8::try_from(maxzoom)? {
+        let meta = store.level_meta(z)?;
+        assert_eq!(meta.z, z);
+        assert_eq!(meta.bands, bands);
+        assert_eq!(meta.inner, 256);
+        assert!(meta.width > 0 && meta.height > 0);
+    }
+    let meta = store.level_meta(u8::try_from(maxzoom)?)?;
+    let level = u8::try_from(maxzoom)?;
+    let window = store.read_window(level, 0, 0, 1, 1)?;
+    assert_eq!(window.bands, (0..bands).collect::<Vec<_>>());
+    assert_eq!(window.values, vec![2.0; bands]);
+
+    let selected = if bands == 1 {
+        vec![0, 0]
+    } else {
+        vec![2, 0, 2]
+    };
+    let selected_window = store.read_bands(level, 0, 0, 1, 1, &selected)?;
+    assert_eq!(selected_window.bands, selected);
+    assert_eq!(
+        selected_window.values,
+        vec![2.0; selected_window.bands.len()]
+    );
+
+    let sparse_col = meta.width / 2 / u64::from(meta.inner);
+    let sparse_row = meta.height / 2 / u64::from(meta.inner);
+    assert!(store.read_chunk(level, sparse_col, sparse_row)?.is_none());
+    let sparse = store.read_window(
+        level,
+        i64::try_from(meta.width / 2)?,
+        i64::try_from(meta.height / 2)?,
+        1,
+        1,
+    )?;
+    assert!(sparse.values.iter().all(|value| value.is_nan()));
     Ok(())
 }
 

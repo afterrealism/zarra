@@ -12,7 +12,9 @@ use tempfile::Builder;
 
 use self::gdal::Gdal;
 use self::webmercator::{native_maxzoom, pick_dst_nodata, tile_range_for};
-use crate::{Channels, Error, LevelMeta, LevelOffset, RasterManifest, Result, TileEncoding};
+use crate::{
+    Channels, DType, Error, LevelMeta, LevelOffset, Nodata, RasterManifest, Result, TileEncoding,
+};
 
 /// Summary of one fully validated, newly published raster store.
 #[derive(Debug)]
@@ -144,8 +146,20 @@ pub fn convert(input: &Path, output: &Path) -> Result<BuildReport> {
     root_file.write_all(b"\n")?;
 
     for level in &manifest.levels {
-        let metadata = read_json(&store.join(level.z.to_string()).join("zarr.json"))?;
+        let path = store.join(level.z.to_string()).join("zarr.json");
+        let mut metadata = read_json(&path)?;
         LevelMeta::from_json(&metadata, level.z, &manifest)?;
+        if metadata.get("fill_value").is_none_or(Value::is_null) {
+            let fill_value = array_fill_value(&manifest)?;
+            let object = metadata
+                .as_object_mut()
+                .ok_or_else(|| Error::Format("level metadata must be an object".into()))?;
+            object.insert("fill_value".into(), fill_value);
+            let encoded = serde_json::to_vec_pretty(&metadata).map_err(|error| {
+                Error::Format(format!("cannot write level fill value: {error}"))
+            })?;
+            fs::write(&path, encoded)?;
+        }
     }
     let files = count_files(&store)?;
     require_absent(&output)?;
@@ -174,6 +188,38 @@ fn read_json(path: &Path) -> Result<Value> {
     let bytes = fs::read(path)?;
     serde_json::from_slice(&bytes)
         .map_err(|error| Error::Format(format!("invalid JSON at {}: {error}", path.display())))
+}
+
+fn array_fill_value(manifest: &RasterManifest) -> Result<Value> {
+    let value = match manifest.nodata {
+        Some(Nodata::NaN) => return Ok(Value::String("NaN".into())),
+        Some(Nodata::Number(value)) => value,
+        None => 0.0,
+    };
+    let (minimum, maximum, signed) = match manifest.dtype {
+        DType::Float32 | DType::Float64 => {
+            return serde_json::Number::from_f64(value)
+                .map(Value::Number)
+                .ok_or_else(|| Error::Format("floating array fill value must be finite".into()));
+        }
+        DType::Uint8 => (0.0, 255.0, false),
+        DType::Int8 => (-128.0, 127.0, true),
+        DType::Uint16 => (0.0, 65_535.0, false),
+        DType::Int16 => (-32_768.0, 32_767.0, true),
+        DType::Uint32 => (0.0, 4_294_967_295.0, false),
+        DType::Int32 => (-2_147_483_648.0, 2_147_483_647.0, true),
+    };
+    if value.fract() != 0.0 || value < minimum || value > maximum {
+        return Err(Error::Format(format!(
+            "array fill value {value} is not representable as {}",
+            manifest.dtype.as_str()
+        )));
+    }
+    if signed {
+        Ok(Value::from(value as i64))
+    } else {
+        Ok(Value::from(value as u64))
+    }
 }
 
 fn count_files(directory: &Path) -> Result<u64> {

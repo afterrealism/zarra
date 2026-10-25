@@ -16,3 +16,7 @@ panic = "deny"
 unimplemented = "deny"
 todo = "deny"
 unreachable = "deny"
+
+# Keep zarrs_http 0.3.1 on the same storage trait source as the zarrs backport.
+[patch.crates-io]
+zarrs_storage = { git = "https://github.com/zarrs/zarrs", rev = "9e55886ecfc4e8f282632d6fb7682869ca69db4b" }

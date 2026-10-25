@@ -61,7 +61,7 @@ The Cargo workspace uses resolver 2, edition 2021, version 0.1.0, MSRV 1.91.0, a
 
 | Dependency | Version / features | Responsibility |
 |---|---|---|
-| `zarrs` | `=0.23.14`; default features off; `filesystem,sharding,crc32c,zstd` | Zarr metadata, keyed storage, sharded reads, codecs |
+| `zarrs` | `0.23.15` full-SHA backport `9e55886ecfc4e8f282632d6fb7682869ca69db4b`; default features off; `filesystem,sharding,crc32c,zstd` | Zarr metadata, keyed storage, sharded reads, codecs |
 | `zarrs_http` | `=0.3.1`; optional under `zarra/http` | Synchronous keyed HTTP storage |
 | `url` | 2; optional under `zarra/http` | Pre-network URL scheme and loopback validation |
 | `serde` / `serde_json` | 1 | Root manifest and GDAL JSON |
@@ -70,7 +70,9 @@ The Cargo workspace uses resolver 2, edition 2021, version 0.1.0, MSRV 1.91.0, a
 | `tempfile` | 3 | Same-parent build/test temporary directories |
 | `clap` | 4 with `derive`; CLI only | Command-line parsing |
 
-`zarrs 0.23.14` declares Rust 1.91, which sets the workspace MSRV. `ndarray`, Blosc, gzip, transpose, and other default `zarrs` features remain disabled. Application crates use `#![forbid(unsafe_code)]`; workspace Clippy denies `unwrap_used`, `expect_used`, `panic`, `unimplemented`, `todo`, and `unreachable` in application code.
+The `zarrs 0.23.15` backport declares Rust 1.91, which sets the workspace MSRV. It fixes the 0.23.14 sparse shard-index overflow found by real GDAL conversion. The root workspace also pins `zarrs_storage` to the same full SHA so registry `zarrs_http 0.3.1` uses a compatible storage trait source. `ndarray`, Blosc, gzip, transpose, and other default `zarrs` features remain disabled. Application crates use `#![forbid(unsafe_code)]`; workspace Clippy denies `unwrap_used`, `expect_used`, `panic`, `unimplemented`, `todo`, and `unreachable` in application code.
+
+**Release gate:** crates.io has only `zarrs 0.23.14` as of 2026-10-25. The user approved keeping the full-SHA backport for local/path use and deferring crates.io publication until `0.23.15` is released. `cargo package --list` is only a file-inclusion check, not a publish-readiness claim. Actual `cargo package`/`cargo publish` remains blocked until `cargo info zarrs@0.23.15` succeeds and the complete package verification passes.
 
 `zarrs_http` accepts a full-body 200 response to some range requests and does not expose its client's total timeout. Therefore v1 makes no remote request-count, byte-budget, or timeout guarantee. HTTP is optional and intended for trusted/read-only public stores; the local conversion and demo paths do not depend on it.
 
@@ -181,6 +183,8 @@ gdal_translate -of ZARR -co FORMAT=ZARR_V3 -co ARRAY_NAME=data
 
 Outer spatial edges are `min(2048, touched_tiles * 256)`, rounded by construction to a multiple of 256. Inner spatial shape is 256×256. A one-band array uses two dimensions `[H,W]`; multiple bands use `[bands,H,W]`. The band axis is included in both shapes only for 3D arrays, so one inner chunk contains every band.
 
+GDAL may emit `fill_value: null` for multiband arrays. Before publication, a null or missing `fill_value` is normalized to the manifest nodata value, or to 0 when no nodata is declared. Integer fills must be finite, integral, and representable in the level dtype; float NaN is written as the string `"NaN"`. This is required for `zarrs` to reopen converted stores; sparse detection still comes from shard indexes, not fill-value comparison.
+
 The store is built as `store` inside a fresh sibling temporary directory. After all levels and the root manifest validate, `fs::rename` publishes that directory in one operation. The output is never overwritten; failure removes temporary content. There is no claim of atomicity across separate object-storage uploads because v1 publishes only a local directory.
 
 `BuildReport` returns the output path, validated manifest, number of published levels, and number of published array/shard files.
@@ -265,6 +269,8 @@ impl RasterStore {
     pub fn read_neighborhood(&mut self, level: u8, cx: i64, cy: i64, radius: u32) -> Result<Window>;
 }
 ```
+
+Every `Chunk` retains the full `inner × inner` shape, including padded edge chunks returned by `zarrs`. `Chunk::value` addresses that padded representation; window reads separately clip to the actual array bounds so out-of-array cells remain NaN.
 
 Chunk coordinates are array-relative. Window coordinates are array-relative pixels and may extend outside the array. `read_chunk` returns `Ok(None)` for an out-of-grid or sparse chunk. Transport, metadata, and decode failures remain `Err`; they never silently become NaN.
 
@@ -367,7 +373,15 @@ cargo test --workspace --all-features --locked
 cargo +1.91.0 test --workspace --all-features --locked
 cargo check -p zarra --no-default-features
 npm --prefix example test
+install_root="$(mktemp -d)"
+cargo install --path crates/zarra-cli --root "$install_root"
+"$install_root/bin/zarra" --help
+rm -rf "${install_root:?}"
+cargo package -p zarra --list --allow-dirty
+cargo package -p zarra-cli --list --allow-dirty
 ```
+
+The install and package-list commands verify local/path usage and file inclusion only. Actual `cargo package` and registry publication remain gated by `zarrs 0.23.15` availability as defined in §3.
 
 A GDAL 3.13.1 container job runs the explicitly ignored integration tests:
 

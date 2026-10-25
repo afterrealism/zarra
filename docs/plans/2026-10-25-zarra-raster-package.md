@@ -6,7 +6,7 @@
 
 **Architecture:** Two publishable crates share one data path: `zarra` owns manifests, GDAL conversion, `zarrs`-backed local/HTTP reads, and PNG rendering; `zarra-cli` exposes that library through `convert`, `info`, `query`, `tile`, and a loopback `serve` command. A store is a directory/prefix with standard Zarr v3 arrays and a root-group `attributes.zarra` manifest, not an FGBA-style single file. The CLI embeds the viewer and range-capable demo server; `example/` supplies only npm launch/tests, so there is no second decoder or server implementation.
 
-**Tech Stack:** Rust 2021, MSRV 1.91.0, `zarrs =0.23.14` (`filesystem,sharding,crc32c,zstd`, defaults off), optional `zarrs_http =0.3.1`, GDAL CLI 3.13.1, `serde`/`serde_json` 1, `thiserror` 2, `png =0.18.1`, `tempfile` 3, `clap` 4, MapLibre GL JS 4.7.1, dependency-free Node.js 20+ tests, Docker for GDAL integration.
+**Tech Stack:** Rust 2021, MSRV 1.91.0, `zarrs 0.23.15` full-SHA backport `9e55886ecfc4e8f282632d6fb7682869ca69db4b` (`filesystem,sharding,crc32c,zstd`, defaults off), optional `zarrs_http =0.3.1`, GDAL CLI 3.13.1, `serde`/`serde_json` 1, `thiserror` 2, `png =0.18.1`, `tempfile` 3, `clap` 4, MapLibre GL JS 4.7.1, dependency-free Node.js 20+ tests, Docker for GDAL integration.
 
 **Spec:** `SPEC.md` (required: profile layout, public contracts, scope, fixtures, and acceptance criteria)
 
@@ -27,6 +27,7 @@
 - Keep the three fixture files' canonical bytes and recorded hashes. Packaged core/CLI tests use byte-identical copies under their own `tests/data/`; `scripts/verify-fixtures.sh` prevents drift.
 - Every task ends with its narrow tests passing and a commit. A later task may extend CI only after the files that CI invokes exist.
 - CI uses `permissions: contents: read` and full 40-character commit SHAs for every third-party action; mutable tags/branches are not allowed.
+- Keep the user-approved full-SHA `zarrs 0.23.15` backport and matching `zarrs_storage` patch for local/path use. crates.io publication is deferred until `0.23.15` is available; `cargo package --list` checks file inclusion only and must not be reported as publish readiness.
 - Preserve explicit acceptance criteria from `SPEC.md`: real GDAL 2D/3D conversion, exact local/HTTP reference reads, golden pixels, deep-overzoom regression, safe range serving, real MapLibre data flow, and stable/MSRV/GDAL/Node checks.
 
 ---
@@ -78,6 +79,7 @@ Paths below are relative to `/home/sheece/Desktop/work/fgba`.
 7. `png 0.18.1` provides `Encoder::new`, `set_color(ColorType::Rgba)`, `set_depth(BitDepth::Eight)`, `set_compression(Compression::Fast)`, `write_header`, and `write_image_data`. Encoding into `&mut Vec<u8>` avoids needing an `into_inner` API.
 8. crates.io returned 404 `crate does not exist` for both `zarra` and `zarra-cli` on 2026-10-25, so both package names were available at planning time. Recheck immediately before publication.
 9. MapLibre's package metadata confirms version 4.7.1 and BSD-3-Clause; `https://raw.githubusercontent.com/maplibre/maplibre-gl-js/v4.7.1/LICENSE.txt` exists and includes the required upstream notices.
+10. Task 3's real GDAL integration proved that 0.23.14 overflows on valid sparse shard entries and that GDAL multiband null fills cannot be reopened. The full-SHA `zarrs 0.23.15` backport fixes sparse reads while preserving the APIs/MSRV. A separate isolated `cargo package` probe failed to resolve `zarrs =0.23.15` from crates.io, so publication is explicitly deferred with the user's approval. `cargo package --list` succeeds and is used only for file-inclusion checks.
 
 ### Planning environment and fixture evidence
 
@@ -132,6 +134,7 @@ Paths below are relative to `/home/sheece/Desktop/work/fgba`.
 | Risk | Mitigation |
 |---|---|
 | `zarrs` API/MSRV drift | Exact direct pins, committed lockfile, compiled reference probe, dedicated 1.91.0 locked job |
+| `zarrs 0.23.14` sparse-index panic and unpublished backport | Use the full-SHA 0.23.15 backport plus matching storage patch, keep real sparse integration, and hold registry publication rather than writing a parallel decoder |
 | GDAL missing or advertises misleading sharding support | Use GDAL 3.13.1 container and prove actual `sharding_indexed` output through conversion/reopen tests; do not grep only `gdalinfo` |
 | Native C/TLS build prerequisites differ by host | Compile the optional HTTP feature during planning and install `build-essential`, `pkg-config`, and `libssl-dev` in the GDAL test image |
 | Hostile metadata triggers large allocation/incorrect addressing | Strict canonical JSON checks, checked arithmetic, 4,194,304-value chunk and 16,777,216-value query caps before reads/allocation |
@@ -625,6 +628,8 @@ git commit -m "feat: convert rasters to canonical multiscale zarr"
 - `RasterStore::open` and feature-gated `open_url` return an owned store with `ReadableStorage`, manifest, and per-level `Array`/`ArrayShardedReadableExtCache` state.
 - CLI `zarra info` and `zarra query` use the same `Source::open() -> Result<RasterStore>` as later `tile`.
 
+**Implementation-proven dependency/publication adjustments:** Use the full-SHA 0.23.15 backport and root `zarrs_storage` patch from Global Constraints, not 0.23.14. Preserve `create/mod.rs`'s normalization of null/missing `fill_value` into a representable manifest fill before publication; it is required to reopen converted 3D stores. Do not reintroduce a custom sparse-index decoder or remove the registry release gate.
+
 - [ ] **Step 1: Turn the compiled probe into failing permanent reference tests**
 
 Write `crates/zarra/tests/refpy.rs` using `concat!(env!("CARGO_MANIFEST_DIR"), "/tests/data/refpy.zarr")`. Cover:
@@ -632,6 +637,7 @@ Write `crates/zarra/tests/refpy.rs` using `concat!(env!("CARGO_MANIFEST_DIR"), "
 - `manifest()` and `level_meta(0)`: one band, 64×64, inner 16, `Uint16`.
 - `enumerate_chunks(0)`: 16 coordinates.
 - Every chunk `(row,col)` in 0..4: `value(0,r,c) == (global_y*1000+global_x) & 0xffff`.
+- A padded 20×20 array with 16×16 inner chunks returns a full 16×16 edge chunk with 256 values; `read_window` still clips to the actual array bounds.
 - `read_chunk(0,9,9)` returns `Ok(None)`.
 - Window 4,4/8×8 inside one chunk and 12,12/8×8 crossing four chunks, both exact.
 - Neighborhood at 0,0/radius 1 has NaN at outside cells and exact interior values.
@@ -651,7 +657,7 @@ For local open, canonicalize the directory, create `FilesystemStore`, open `Grou
 
 - [ ] **Step 3: Implement chunk/window/band reads with typed sparse/error semantics**
 
-In `query.rs`, implement `read_chunk` by constructing `[row,col]` or `[0,row,col]` subchunk indices, calling `subchunk_byte_range`, returning `Ok(None)` when absent, and decoding `Vec<T>` with a small dtype dispatch macro. Convert into band-planar `Vec<f64>` and verify exact expected length. `Chunk::value` returns `None` for any out-of-range coordinate instead of indexing unchecked.
+In `query.rs`, implement `read_chunk` by constructing `[row,col]` or `[0,row,col]` subchunk indices, calling `subchunk_byte_range`, returning `Ok(None)` when absent, and decoding `Vec<T>` with a small dtype dispatch macro. Convert into band-planar `Vec<f64>` and verify exact expected length as `bands * inner * inner`, never the bounded edge size: `zarrs` pads edge chunks to the full inner shape. `Chunk::value` returns `None` for any out-of-range coordinate instead of indexing unchecked; `read_window` clips to actual array bounds separately.
 
 Implement `read_window` with a NaN-filled, band-interleaved output and clamped iteration over intersecting inner chunks. Sparse chunks remain NaN; any actual error is returned. Reorder zarrs' band-planar values into `SPEC.md`'s output layout. `read_bands` shares the same internal implementation and validates all indices before reading; repeats are allowed. `read_neighborhood` uses checked `2r+1` and coordinate arithmetic. `enumerate_chunks` checks grid/cap before allocation.
 
@@ -937,7 +943,7 @@ Copy the Apache license text from FGBA. Use its MIT text with line 3 replaced by
 - FGBA as the package/range-server structural reference; no FGB/A5 code in the runtime data path.
 - Zarr/ZEP0002, `zarrs`/`zarrs_http` (MIT OR Apache-2.0), GDAL (MIT), `png` (MIT OR Apache-2.0), MapLibre 4.7.1 and Mapbox/glfx/d3 notices in the vendored license.
 
-`CHANGELOG.md` uses Keep a Changelog/SemVer and one `0.1.0 - Unreleased` entry covering only implemented features. `RELEASING.md` includes clean-tree/tests, rechecking crate-name availability, `cargo package -p zarra`, publish core, wait for index, package/publish CLI, tag, docs.rs `http` feature check, and `cargo install zarra-cli` smoke. It does not instruct publishing a nonexistent SQL crate.
+`CHANGELOG.md` uses Keep a Changelog/SemVer and one `0.1.0 - Unreleased` entry covering only implemented features. `RELEASING.md` starts with the upstream gate: `cargo info zarrs@0.23.15` must succeed before any package/publish command; if it fails, stop and retain the local/path release only. Once available, it includes clean-tree/tests, rechecking crate-name availability, `cargo package -p zarra`, publish core, wait for index, package/publish CLI, tag, docs.rs `http` feature check, and `cargo install zarra-cli` smoke. It does not instruct publishing a nonexistent SQL crate or treating the backport's git pin as registry availability.
 
 - [ ] **Step 3: Run formatting, lint, feature, docs, fixture, and package checks**
 
@@ -951,14 +957,17 @@ cargo check -p zarra --no-default-features
 RUSTDOCFLAGS='-D warnings' cargo doc --workspace --all-features --no-deps
 cargo +1.91.0 test --workspace --all-features --locked
 npm --prefix example test
-cargo package -p zarra --allow-dirty
+install_root="$(mktemp -d)"
+cargo install --path crates/zarra-cli --root "$install_root"
+"$install_root/bin/zarra" --help
+rm -rf "${install_root:?}"
 cargo package -p zarra --list --allow-dirty
 cargo package -p zarra-cli --list --allow-dirty
 ```
 
-Expected: every command exits 0. The core package verifies successfully and includes its README/test fixture; the CLI package list includes `assets/index.html`, `assets/geo.js`, and all three vendored MapLibre files. Do not run a dependent CLI publish dry-run before core is published; the release document explains why.
+Expected: every command exits 0. The path-installed binary prints help; the core package list includes its README/test fixture, and the CLI package list includes `assets/index.html`, `assets/geo.js`, and all three vendored MapLibre files. These are local/path and file-inclusion checks, not crates.io readiness. Do not run `cargo package` or a dependent publish dry-run until `cargo info zarrs@0.23.15` succeeds and core is published; the release document explains both gates.
 
-After they pass locally, add the doc and core-package commands to CI. Keep stable, MSRV, GDAL, fixture, and Node jobs required.
+After they pass locally, add the doc, path-install, and package-list commands to CI. Keep stable, MSRV, GDAL, fixture, and Node jobs required.
 
 - [ ] **Step 4: Run the full end-to-end and inspect the final diff**
 
@@ -984,7 +993,7 @@ Check each acceptance item explicitly:
 - [ ] Golden RG16/RGB8/nodata/deep-overzoom/offset tests pass through zoom 22.
 - [ ] Server nested ranges, HEAD, errors, traversal defenses, CORS, and static assets pass.
 - [ ] Browser imports the same `geo.js` under test and consumes the real Rust tile route.
-- [ ] Stable, 1.91.0 locked, GDAL 3.13.1, Node 20+, fixture, docs, and core packaging checks pass.
+- [ ] Stable, 1.91.0 locked, GDAL 3.13.1, Node 20+, fixture, docs, local/path install, and package-list checks pass.
 - [ ] Docs contain only observed results and the declared support matrix.
 
 Fix any mismatch at its root cause; do not weaken a test or claim an unrun check.
@@ -1011,4 +1020,4 @@ Report only verified outcomes, with exact commands and counts where available:
 3. GDAL 3.13.1 2D/3D conversion and no-clobber results.
 4. Local/HTTP reference-query and golden-pixel results, including `maxzoom+13` and zoom 22.
 5. Node server/viewer tests and whether the final WebGL browser smoke was actually observed.
-6. Any residual limitation from `SPEC.md` (especially HTTP timeout/full-body/redirect behavior, GDAL resource bounds, and local-only publication) without presenting it as a defect fixed in v1.
+6. Any residual limitation from `SPEC.md` (especially HTTP timeout/full-body/redirect behavior, GDAL resource bounds, local-only publication, and the user-approved crates.io hold until `zarrs 0.23.15` is released) without presenting it as a defect fixed in v1.

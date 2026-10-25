@@ -1,10 +1,14 @@
 //! Canonical Zarr v3 array metadata validation.
 
 use serde_json::{Map, Value};
+use zarrs::array::Array;
+use zarrs::storage::ReadableStorageTraits;
 
 use crate::{DType, Error, RasterManifest, Result};
 
 const MAX_CHUNK_VALUES: u64 = 4_194_304;
+
+pub(crate) type DynArray = Array<dyn ReadableStorageTraits>;
 
 /// Validated geometry and element metadata for one raster level.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -24,6 +28,14 @@ pub struct LevelMeta {
 }
 
 impl LevelMeta {
+    /// Validates an opened array through the same canonical JSON validator.
+    pub(crate) fn from_array(array: &DynArray, z: u8, manifest: &RasterManifest) -> Result<Self> {
+        let metadata = serde_json::to_value(array.metadata()).map_err(|error| {
+            format_error(format!("cannot serialize level {z} metadata: {error}"))
+        })?;
+        Self::from_json(&metadata, z, manifest)
+    }
+
     /// Validates canonical array JSON and derives its public level metadata.
     ///
     /// GDAL writes one band as `[H,W]`; an explicit `[bands,H,W]` axis is also

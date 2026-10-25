@@ -7,6 +7,9 @@ use std::process::ExitCode;
 use clap::{Parser, Subcommand};
 
 mod convert;
+mod info;
+mod query;
+mod source;
 
 /// Work with canonical multiscale Zarr v3 raster stores.
 #[derive(Parser)]
@@ -20,12 +23,18 @@ struct Cli {
 enum Command {
     /// Convert a local GeoTIFF/COG into a canonical multiscale Zarr store.
     Convert(convert::ConvertArgs),
+    /// Print a store manifest and every available level.
+    Info(info::InfoArgs),
+    /// Read an array-relative pixel window as JSON.
+    Query(query::QueryArgs),
 }
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
     let result = match cli.command {
         Command::Convert(arguments) => convert::run(arguments),
+        Command::Info(arguments) => info::run(arguments),
+        Command::Query(arguments) => query::run(arguments),
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,

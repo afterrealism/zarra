@@ -1,0 +1,18 @@
+[workspace]
+resolver = "2"
+members = ["crates/zarra", "crates/zarra-cli"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.91.0"
+license = "Apache-2.0 OR MIT"
+repository = "https://github.com/afterrealism/zarra"
+
+[workspace.lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+unimplemented = "deny"
+todo = "deny"
+unreachable = "deny"

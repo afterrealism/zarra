@@ -1,0 +1,24 @@
+{
+  "zarr_format": 3,
+  "node_type": "group",
+  "attributes": {
+    "zarra": {
+      "profile_version": 1,
+      "crs": 3857,
+      "tile_size": 16,
+      "dtype": "uint16",
+      "bands": 1,
+      "nodata": null,
+      "minzoom": 0,
+      "maxzoom": 0,
+      "levels": [{ "z": 0, "xoff": 0, "yoff": 0 }],
+      "tile_encoding": {
+        "channels": "rg16",
+        "encoded_min": 0.0,
+        "encoded_max": 63063.0
+      },
+      "per_band_range": [[0.0, 63063.0]],
+      "extent": [-180.0, -85.0, 180.0, 85.0]
+    }
+  }
+}

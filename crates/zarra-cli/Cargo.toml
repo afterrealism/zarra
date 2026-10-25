@@ -1,0 +1,23 @@
+[package]
+name = "zarra-cli"
+description = "Command-line tools for canonical multiscale Zarr v3 raster stores"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+readme = "README.md"
+include = ["src/**", "assets/**", "tests/**", "Cargo.toml", "README.md"]
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "zarra"
+path = "src/main.rs"
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+zarra = { version = "0.1.0", path = "../zarra", features = ["http"] }

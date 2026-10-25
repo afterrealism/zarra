@@ -724,7 +724,7 @@ Inside `render.rs`'s `#[cfg(test)]` module, create small synthetic `Chunk` value
 - Only the first selected band controls alpha; a nodata value in a later band does not clear an otherwise valid first-band pixel.
 - Nearest-neighbor subwindow sampling at factor 2.
 
-In `crates/zarra/tests/render.rs`, decode output with `png::Decoder` and verify 16×16 reference output, including pixel (2,9) normalized from 2009/63063. Test invalid bands/coords, maxzoom, `+1`, `+12`, `+13`, and zoom 22. For the offset case, make a temp store whose level 2 is a copy of level 0 and whose level-2 manifest offset is (4,3); rendering z2/x4/y3 must succeed against array chunk (0,0), while valid z2/x0/y0 returns `Tile::Empty` before the offset. Also use a metadata-only sparse store to prove an absent shard returns `Tile::Empty`.
+In `crates/zarra/tests/render.rs`, decode output with `png::Decoder` and verify 16×16 reference output, including pixel (2,9) normalized from 2009/63063. Test invalid bands/coords, maxzoom, `+1`, `+12`, `+13`, and zoom 22. For the offset case, make a temp store whose level 3 is a copy of level 0 and whose level-3 manifest offset is (4,3), valid because `4,3 < 2^3`; rendering z3/x4/y3 must succeed against array chunk (0,0), while valid z3/x0/y0 returns `Tile::Empty` before the offset. Also use a metadata-only sparse store to prove an absent shard returns `Tile::Empty`.
 
 Run `cargo test -p zarra --test render`. Expected: FAIL because rendering is absent.
 

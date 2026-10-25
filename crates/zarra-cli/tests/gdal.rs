@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::fs;
+use std::io::Cursor;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
@@ -31,6 +32,46 @@ fn convert(input: &Path, output: &Path) -> Result<Output, Box<dyn std::error::Er
         .output()?)
 }
 
+fn tile(input: &Path, z: u8, x: u32, y: u32, output: &Path) -> TestResult {
+    let result = Command::new(env!("CARGO_BIN_EXE_zarra"))
+        .arg("tile")
+        .arg(input)
+        .arg("--z")
+        .arg(z.to_string())
+        .arg("--x")
+        .arg(x.to_string())
+        .arg("--y")
+        .arg(y.to_string())
+        .arg("-o")
+        .arg(output)
+        .output()?;
+    assert!(
+        result.status.success(),
+        "tile failed: {}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(
+        String::from_utf8(result.stdout)?,
+        format!("{}\n", output.display())
+    );
+    Ok(())
+}
+
+fn decode_png(path: &Path) -> Result<(u32, u32, Vec<u8>), Box<dyn std::error::Error>> {
+    let mut reader = png::Decoder::new(Cursor::new(fs::read(path)?)).read_info()?;
+    let mut pixels = vec![
+        0;
+        reader
+            .output_buffer_size()
+            .ok_or("missing PNG buffer size")?
+    ];
+    let info = reader.next_frame(&mut pixels)?;
+    assert_eq!(info.color_type, png::ColorType::Rgba);
+    assert_eq!(info.bit_depth, png::BitDepth::Eight);
+    pixels.truncate(info.buffer_size());
+    Ok((info.width, info.height, pixels))
+}
+
 fn assert_conversion_success(output: &Output, bands: usize) {
     assert!(
         output.status.success(),
@@ -53,6 +94,11 @@ fn validate_store(output: &Path, bands: usize) -> TestResult {
     assert_eq!(manifest["crs"], 3857);
     assert_eq!(manifest["tile_size"], 256);
     assert_eq!(manifest["bands"], bands);
+    assert_eq!(
+        manifest["per_band_range"],
+        serde_json::json!(vec![[0.0, 1.0]; bands])
+    );
+    assert_eq!(manifest["nodata"], serde_json::json!(2.0));
     assert_eq!(
         manifest["tile_encoding"]["channels"],
         if bands == 1 { "rg16" } else { "rgba8" }
@@ -115,6 +161,8 @@ fn validate_store(output: &Path, bands: usize) -> TestResult {
     let window = store.read_window(level, 0, 0, 1, 1)?;
     assert_eq!(window.bands, (0..bands).collect::<Vec<_>>());
     assert_eq!(window.values, vec![2.0; bands]);
+    let valid = store.read_window(level, 255, 255, 1, 1)?;
+    assert_eq!(valid.values, vec![0.0; bands]);
 
     let selected = if bands == 1 {
         vec![0, 0]
@@ -139,6 +187,37 @@ fn validate_store(output: &Path, bands: usize) -> TestResult {
         1,
     )?;
     assert!(sparse.values.iter().all(|value| value.is_nan()));
+
+    let offset = store
+        .manifest()
+        .level(level)
+        .ok_or("missing native level offset")?;
+    let overzoom = level.checked_add(1).ok_or("overzoom exceeds u8")?;
+    let over_x = offset
+        .xoff
+        .checked_mul(2)
+        .and_then(|x| x.checked_add(1))
+        .ok_or("overzoom x overflows")?;
+    let over_y = offset
+        .yoff
+        .checked_mul(2)
+        .and_then(|y| y.checked_add(1))
+        .ok_or("overzoom y overflows")?;
+    let parent = output.parent().ok_or("converted store has no parent")?;
+    let dimensions = if bands == 1 { "2d" } else { "3d" };
+    for (name, z, x, y) in [
+        ("native", level, offset.xoff, offset.yoff),
+        ("overzoom", overzoom, over_x, over_y),
+    ] {
+        let path = parent.join(format!("{dimensions}-{name}.png"));
+        tile(output, z, x, y, &path)?;
+        let (width, height, pixels) = decode_png(&path)?;
+        assert_eq!((width, height), (256, 256));
+        assert_eq!(pixels.len(), 256 * 256 * 4);
+        // Border value 2 is declared nodata; valid value 0 maps to the low endpoint.
+        assert_eq!(&pixels[..4], [0, 0, 0, 0]);
+        assert_eq!(&pixels[pixels.len() - 4..], [0, 0, 0, 255]);
+    }
     Ok(())
 }
 

@@ -10,6 +10,7 @@ mod convert;
 mod info;
 mod query;
 mod source;
+mod tile;
 
 /// Work with canonical multiscale Zarr v3 raster stores.
 #[derive(Parser)]
@@ -27,6 +28,8 @@ enum Command {
     Info(info::InfoArgs),
     /// Read an array-relative pixel window as JSON.
     Query(query::QueryArgs),
+    /// Render one XYZ tile as a new RGBA PNG file.
+    Tile(tile::TileArgs),
 }
 
 fn main() -> ExitCode {
@@ -35,6 +38,7 @@ fn main() -> ExitCode {
         Command::Convert(arguments) => convert::run(arguments),
         Command::Info(arguments) => info::run(arguments),
         Command::Query(arguments) => query::run(arguments),
+        Command::Tile(arguments) => tile::run(arguments),
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,

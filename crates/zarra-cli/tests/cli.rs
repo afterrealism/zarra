@@ -1,3 +1,5 @@
+use std::fs;
+use std::path::Path;
 use std::process::{Command, Output};
 
 use serde_json::Value;
@@ -33,6 +35,28 @@ fn assert_failure(arguments: &[&str]) -> TestResult {
         String::from_utf8_lossy(&output.stderr)
     );
     Ok(())
+}
+
+fn assert_png_16(bytes: &[u8]) -> TestResult {
+    assert!(bytes.len() >= 33, "PNG is too short");
+    assert_eq!(&bytes[..8], b"\x89PNG\r\n\x1a\n");
+    assert_eq!(&bytes[12..16], b"IHDR");
+    assert_eq!(u32::from_be_bytes(bytes[16..20].try_into()?), 16);
+    assert_eq!(u32::from_be_bytes(bytes[20..24].try_into()?), 16);
+    assert_eq!(bytes[24], 8, "PNG must use 8-bit channels");
+    assert_eq!(bytes[25], 6, "PNG must use RGBA color type 6");
+    Ok(())
+}
+
+fn copy_sparse_store(parent: &Path) -> Result<std::path::PathBuf, Box<dyn std::error::Error>> {
+    let root = parent.join("sparse.zarr");
+    fs::create_dir_all(root.join("0"))?;
+    fs::copy(Path::new(STORE).join("zarr.json"), root.join("zarr.json"))?;
+    fs::copy(
+        Path::new(STORE).join("0/zarr.json"),
+        root.join("0/zarr.json"),
+    )?;
+    Ok(root)
 }
 
 #[test]
@@ -139,5 +163,102 @@ fn invalid_sources_dimensions_bands_levels_and_urls_fail() -> TestResult {
     ] {
         assert_failure(&arguments)?;
     }
+    Ok(())
+}
+
+#[test]
+fn tile_writes_native_and_deep_overzoom_pngs() -> TestResult {
+    let temporary = tempfile::tempdir()?;
+    for (zoom, name) in [(0, "native"), (13, "deep")] {
+        let path = temporary.path().join(format!("{name}.png"));
+        let zoom = zoom.to_string();
+        let path_text = path.to_str().ok_or("temporary path is not UTF-8")?;
+        let output = run(&[
+            "tile", STORE, "--z", &zoom, "--x", "0", "--y", "0", "-o", path_text,
+        ])?;
+        assert!(
+            output.status.success(),
+            "tile failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(
+            String::from_utf8(output.stdout)?,
+            format!("{}\n", path.display())
+        );
+        assert_png_16(&fs::read(&path)?)?;
+    }
+    Ok(())
+}
+
+#[test]
+fn tile_sparse_is_empty_but_invalid_xyz_and_bands_are_errors() -> TestResult {
+    let temporary = tempfile::tempdir()?;
+    let sparse = copy_sparse_store(temporary.path())?;
+    let sparse_text = sparse.to_str().ok_or("sparse path is not UTF-8")?;
+    let output_path = temporary.path().join("empty.png");
+    let output_text = output_path.to_str().ok_or("output path is not UTF-8")?;
+    let output = run(&[
+        "tile",
+        sparse_text,
+        "--z",
+        "0",
+        "--x",
+        "0",
+        "--y",
+        "0",
+        "-o",
+        output_text,
+    ])?;
+    assert!(
+        output.status.success(),
+        "sparse tile failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(String::from_utf8(output.stdout)?, "empty\n");
+    assert!(!output_path.exists());
+
+    assert_failure(&[
+        "tile",
+        STORE,
+        "--z",
+        "0",
+        "--x",
+        "1",
+        "--y",
+        "0",
+        "-o",
+        output_text,
+    ])?;
+    assert!(!output_path.exists());
+    for bands in ["", "0,,0", "0,", "b", "1", "0,0,0,0"] {
+        assert_failure(&[
+            "tile",
+            STORE,
+            "--z",
+            "0",
+            "--x",
+            "0",
+            "--y",
+            "0",
+            "--bands",
+            bands,
+            "-o",
+            output_text,
+        ])?;
+        assert!(!output_path.exists(), "invalid bands created {bands:?}");
+    }
+    Ok(())
+}
+
+#[test]
+fn tile_never_clobbers_an_existing_output() -> TestResult {
+    let temporary = tempfile::tempdir()?;
+    let path = temporary.path().join("existing.png");
+    fs::write(&path, b"keep this exact content")?;
+    let path_text = path.to_str().ok_or("output path is not UTF-8")?;
+    assert_failure(&[
+        "tile", STORE, "--z", "0", "--x", "0", "--y", "0", "-o", path_text,
+    ])?;
+    assert_eq!(fs::read(&path)?, b"keep this exact content");
     Ok(())
 }

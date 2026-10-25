@@ -1,12 +1,14 @@
 [package]
 name = "zarra"
-description = "Canonical multiscale Zarr v3 raster manifests and validation"
+description = "Convert, query, and render canonical multiscale Zarr v3 rasters"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 readme = "README.md"
+keywords = ["zarr", "raster", "geospatial", "gdal", "cog"]
+categories = ["science::geo", "parser-implementations"]
 include = ["src/**", "tests/**", "Cargo.toml", "README.md"]
 
 [package.metadata.docs.rs]

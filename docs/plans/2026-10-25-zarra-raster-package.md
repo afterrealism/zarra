@@ -1003,7 +1003,7 @@ Fix any mismatch at its root cause; do not weaken a test or claim an unrun check
 ```bash
 git add .
 git commit -m "docs: package zarra for initial release"
-git diff --stat HEAD~6..HEAD
+git diff --stat 4b825dc642cb6eb9a060e54bf8d69288fbee4904..HEAD
 git status --short
 ```
 

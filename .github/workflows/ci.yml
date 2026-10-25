@@ -20,7 +20,16 @@ jobs:
       - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
       - run: cargo test --workspace --all-features --locked
       - run: cargo check -p zarra --no-default-features
+      - run: RUSTDOCFLAGS='-D warnings' cargo doc --workspace --all-features --no-deps
       - run: npm --prefix example test
+      - name: Verify path installation
+        run: |
+          install_root="$(mktemp -d)"
+          trap 'rm -rf -- "${install_root:?}"' EXIT
+          cargo install --path crates/zarra-cli --root "$install_root"
+          "$install_root/bin/zarra" --help
+      - run: cargo package -p zarra --list --allow-dirty
+      - run: cargo package -p zarra-cli --list --allow-dirty
 
   msrv:
     runs-on: ubuntu-latest

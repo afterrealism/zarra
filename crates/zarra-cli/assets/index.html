@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="referrer" content="no-referrer">
+  <title>Zarra — local raster viewer</title>
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/vendor/maplibre-gl.css">
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <a class="skip-link" href="#viewer">Skip to raster viewer</a>
+  <header class="site-header">
+    <p class="eyebrow">Local Zarr v3 raster</p>
+    <h1>Zarra</h1>
+    <p>Real XYZ tiles, rendered by the local Rust server.</p>
+  </header>
+  <main id="viewer" class="layout" tabindex="-1">
+    <section class="map-panel" aria-labelledby="map-title">
+      <div class="map-toolbar">
+        <h2 id="map-title">Raster map</h2>
+        <button id="fit" type="button" aria-label="Fit map to the declared raster extent" disabled>Fit extent</button>
+      </div>
+      <div id="map" role="region" aria-label="Interactive Zarr raster map"></div>
+      <p id="status" class="status" aria-live="polite">Starting viewer…</p>
+    </section>
+    <aside class="metadata" aria-labelledby="metadata-title">
+      <section>
+        <h2 id="metadata-title">Store metadata</h2>
+        <dl>
+          <div><dt>Data type</dt><dd id="dtype">—</dd></div>
+          <div><dt>Bands</dt><dd id="bands">—</dd></div>
+          <div><dt>Levels</dt><dd id="levels">—</dd></div>
+          <div><dt>Tile size</dt><dd id="tile-size">—</dd></div>
+          <div><dt>Encoding</dt><dd id="encoding">—</dd></div>
+        </dl>
+      </section>
+      <section aria-labelledby="telemetry-title">
+        <h2 id="telemetry-title">Pointer telemetry</h2>
+        <dl>
+          <div><dt>Integer zoom</dt><dd id="zoom">—</dd></div>
+          <div><dt>XYZ tile</dt><dd id="tile">—</dd></div>
+          <div><dt>Latitude, longitude</dt><dd id="coordinates">—</dd></div>
+        </dl>
+      </section>
+      <p class="note">Fit uses the declared extent, or the world from −180°/−85° to 180°/85° when none is declared. Use the map’s native keyboard and navigation controls to explore.</p>
+      <a class="license" href="/vendor/maplibre-LICENSE.txt">MapLibre 4.7.1 license</a>
+    </aside>
+  </main>
+  <script src="/vendor/maplibre-gl.js"></script>
+  <script type="module" src="/app.js"></script>
+</body>
+</html>

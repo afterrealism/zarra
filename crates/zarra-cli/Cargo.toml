@@ -24,4 +24,5 @@ zarra = { version = "0.1.0", path = "../zarra", features = ["http"] }
 
 [dev-dependencies]
 png = "=0.18.1"
+reqwest = { version = "0.12", default-features = false, features = ["blocking"] }
 tempfile = "3"

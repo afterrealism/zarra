@@ -165,7 +165,7 @@ Paths below are relative to `/home/sheece/Desktop/work/fgba`.
 | CLI server | `crates/zarra-cli/src/{serve,range,viewer}.rs` | Loopback routing, safe nested range responses, embedded assets |
 | CLI tests | `crates/zarra-cli/tests/{cli,serve,gdal}.rs` | Real binary contracts, server/PNG/range behavior, ignored GDAL conversions |
 | CLI fixtures | `crates/zarra-cli/tests/data/{refpy.zarr/**,sample.tif}` | Packaged server/CLI/GDAL inputs |
-| Browser assets | `crates/zarra-cli/assets/{index.html,app.js,geo.js,styles.css,favicon.svg}`, `assets/vendor/**` | Actual MapLibre viewer and shared testable URL/source logic |
+| Browser assets | `crates/zarra-cli/assets/{index.html,app.js,geo.js,styles.css,favicon.svg,package.json}`, `assets/vendor/**` | Actual MapLibre viewer, shared testable URL/source logic, and Node 20 ESM marker |
 | Example | `example/{package.json,README.md,viewer.test.mjs}` | npm launcher and dependency-free integration tests; no second server |
 | Verification | `scripts/{verify-fixtures.sh,test-gdal.sh,Dockerfile.gdal}` | Fixture drift gate and reproducible GDAL 1.91/3.13.1 test environment |
 | Package docs | `README.md`, per-crate READMEs, `ATTRIBUTION.md`, `CHANGELOG.md`, `RELEASING.md`, `LICENSE-*` | Accurate scope/quickstart/provenance/release process |
@@ -773,7 +773,7 @@ git commit -m "feat: render raster zarr stores as xyz png tiles"
 
 **Files:**
 - Create: `crates/zarra-cli/src/{serve,range,viewer}.rs`
-- Create: `crates/zarra-cli/assets/{index.html,app.js,geo.js,styles.css,favicon.svg}`
+- Create: `crates/zarra-cli/assets/{index.html,app.js,geo.js,styles.css,favicon.svg,package.json}`
 - Create: `crates/zarra-cli/assets/vendor/{maplibre-gl.js,maplibre-gl.css,maplibre-LICENSE.txt}`
 - Modify: `crates/zarra-cli/src/main.rs`, `crates/zarra-cli/Cargo.toml` (add `reqwest = { version = "0.12", default-features = false, features = ["blocking"] }` as a dev-dependency and keep `src/**`, `assets/**`, `tests/**`, `Cargo.toml`, `README.md` in the package include list)
 - Create: `crates/zarra-cli/tests/serve.rs`
@@ -854,7 +854,7 @@ In `serve.rs`, canonicalize/open the store before binding `127.0.0.1:port`, prin
 
 - [ ] **Step 5: Implement the actual viewer and npm launcher**
 
-`geo.js` contains only pure shared logic: `RASTER_OPACITY = 0.92`, `tileCoords` using the source formula, and `rasterSource(manifest, origin="")` returning the exact source object tested above.
+`geo.js` contains only pure shared logic: `RASTER_OPACITY = 0.92`, `tileCoords` using the source formula, and `rasterSource(manifest, origin="")` returning the exact source object tested above. Add `assets/package.json` with `{ "type": "module" }` so Node 20 imports this exact browser module as ESM; it declares no dependency or second implementation.
 
 `app.js` fetches `/api/store`, creates a MapLibre map with a dark background, registers the real raster source/layer, and fits `extent` or fallback `[[-180,-85],[180,85]]`. Add `NavigationControl`, a labeled native fit button, metadata fields, pointer XYZ/zoom telemetry, and loading/error status through `aria-live`. No fabricated request ledger or hard-coded tile image.
 

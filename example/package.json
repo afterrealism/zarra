@@ -1,0 +1,14 @@
+{
+  "name": "zarra-raster-example",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "cargo run -p zarra-cli -- serve ../testdata/refpy.zarr --port 8090",
+    "dev": "cargo watch -x 'run -p zarra-cli -- serve ../testdata/refpy.zarr --port 8090'",
+    "test": "cargo build -p zarra-cli && node --test viewer.test.mjs"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

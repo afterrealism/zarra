@@ -2394,6 +2394,7 @@ version = "0.1.0"
 dependencies = [
  "clap",
  "png",
+ "reqwest",
  "serde",
  "serde_json",
  "tempfile",

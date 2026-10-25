@@ -12,11 +12,15 @@ jobs:
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec
         with:
           components: rustfmt, clippy
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: 20
       - run: bash scripts/verify-fixtures.sh
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
       - run: cargo test --workspace --all-features --locked
       - run: cargo check -p zarra --no-default-features
+      - run: npm --prefix example test
 
   msrv:
     runs-on: ubuntu-latest

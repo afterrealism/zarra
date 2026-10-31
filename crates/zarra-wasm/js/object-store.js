@@ -1,4 +1,6 @@
 const cache = new Map();
+// Full GETs retrieve Zarr JSON metadata; 1 MiB accommodates substantial attributes without unbounded reads.
+const MAX_METADATA_BYTES = 1024 * 1024;
 let activeGeneration;
 
 function assertNetworkUrl(value, label) {
@@ -9,6 +11,9 @@ function assertNetworkUrl(value, label) {
     throw new Error(`${label} is not a valid URL`);
   }
   const loopback = ["localhost", "127.0.0.1", "[::1]"].includes(url.hostname);
+  if (url.username || url.password) {
+    throw new Error(`${label} must not include credentials`);
+  }
   if (url.protocol !== "https:" && !(url.protocol === "http:" && loopback)) {
     throw new Error(`${label} must use HTTPS`);
   }
@@ -113,6 +118,42 @@ function responseError(key, status) {
   return new Error(`object request for ${key} returned ${status}`);
 }
 
+async function readBody(response, key, maximum) {
+  if (typeof response.body?.getReader !== "function") {
+    throw new Error(`object response streaming is unavailable for ${key}`);
+  }
+  const reader = response.body.getReader();
+  const chunks = [];
+  let length = 0;
+  try {
+    while (true) {
+      let result;
+      try {
+        result = await reader.read();
+      } catch {
+        throw new Error(`object response decoding failed for ${key}`);
+      }
+      if (result.done) break;
+      const chunk = result.value;
+      if (length + chunk.byteLength > maximum) {
+        try { await reader.cancel(); } catch {}
+        throw new Error(`object response for ${key} exceeds ${maximum} bytes`);
+      }
+      chunks.push(chunk);
+      length += chunk.byteLength;
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  const bytes = new Uint8Array(length);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return bytes;
+}
+
 async function fetchObject(key, path, generation, signEndpoint, rangeHeader, force = false) {
   const url = await cachedUrl(key, path, generation, signEndpoint, force);
   let response;
@@ -145,22 +186,15 @@ async function fetchObject(key, path, generation, signEndpoint, rangeHeader, for
     throw new Error(`partial object request for ${key} returned 200 instead of 206`);
   }
   if (rangeHeader && response.status !== 206) throw responseError(key, response.status);
-  if (rangeHeader) validateRange(rangeHeader, contentRange);
-  let bytes;
-  try {
-    bytes = new Uint8Array(await response.arrayBuffer());
-  } catch {
-    throw new Error(`object response decoding failed for ${key}`);
-  }
+  const expected = rangeHeader ? validateRange(rangeHeader, contentRange) : null;
+  const maximum = expected ? expected.end - expected.start + 1 : MAX_METADATA_BYTES;
+  const bytes = await readBody(response, key, maximum);
   const declared = response.headers.get("Content-Length");
   if (declared !== null && (!/^\d+$/.test(declared) || Number(declared) !== bytes.byteLength)) {
     throw new Error(`object response length mismatch for ${key}`);
   }
-  if (rangeHeader) {
-    const expected = parseContentRange(contentRange);
-    if (bytes.byteLength !== expected.end - expected.start + 1) {
-      throw new Error(`partial object response length mismatch for ${key}`);
-    }
+  if (rangeHeader && bytes.byteLength !== maximum) {
+    throw new Error(`partial object response length mismatch for ${key}`);
   }
   return { status: response.status, bytes, contentRange: rangeHeader ? contentRange : null, contentLength: bytes.byteLength };
 }

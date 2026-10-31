@@ -7,6 +7,19 @@ export async function openRaster(options) {
   const pending = new Map();
   let nextId = 1;
   let closed = false;
+  let terminalError;
+
+  function shutdown(error) {
+    if (closed) return;
+    closed = true;
+    terminalError = error;
+    worker.terminate();
+    for (const request of pending.values()) {
+      request.cleanup();
+      request.reject(error);
+    }
+    pending.clear();
+  }
 
   worker.onmessage = ({ data }) => {
     const request = pending.get(data.id);
@@ -17,15 +30,11 @@ export async function openRaster(options) {
     else request.reject(new Error(data.error));
   };
   worker.onerror = () => {
-    for (const request of pending.values()) {
-      request.cleanup();
-      request.reject(new Error("raster worker failed"));
-    }
-    pending.clear();
+    shutdown(new Error("raster worker failed"));
   };
 
   function call(type, payload = {}, signal) {
-    if (closed) return Promise.reject(new Error("raster is closed"));
+    if (closed) return Promise.reject(terminalError);
     if (signal?.aborted) return Promise.reject(abortError());
     const id = nextId++;
     return new Promise((resolve, reject) => {
@@ -58,19 +67,12 @@ export async function openRaster(options) {
         try {
           await call("close");
         } finally {
-          closed = true;
-          worker.terminate();
-          for (const request of pending.values()) {
-            request.cleanup();
-            request.reject(new Error("raster is closed"));
-          }
-          pending.clear();
+          shutdown(new Error("raster is closed"));
         }
       },
     };
   } catch (error) {
-    closed = true;
-    worker.terminate();
+    shutdown(error);
     throw error;
   }
 }

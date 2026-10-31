@@ -124,6 +124,13 @@ const storeServer = http.createServer(async (request, response) => {
     return;
   }
   const range = request.headers.range;
+  if (!range && behavior?.oversizedMetadata) {
+    response.setHeader("Transfer-Encoding", "chunked");
+    response.writeHead(200);
+    response.write(Buffer.alloc(1024 * 1024));
+    response.end(Buffer.alloc(1));
+    return;
+  }
   if (!range) {
     response.setHeader("Content-Length", String(bytes.length));
     response.writeHead(200).end(bytes);
@@ -158,6 +165,14 @@ const storeServer = http.createServer(async (request, response) => {
   if (behavior?.partial200) status = 200;
   if (behavior?.wrongRange) contentRange = `bytes 0-0/${bytes.length}`;
   if (behavior?.wrongLength) body = body.subarray(0, Math.max(0, body.length - 1));
+  if (behavior?.oversizedPartial) {
+    response.setHeader("Content-Range", contentRange);
+    response.setHeader("Transfer-Encoding", "chunked");
+    response.writeHead(206);
+    response.write(body);
+    response.end(Buffer.alloc(1));
+    return;
+  }
   response.setHeader("Content-Range", contentRange);
   response.setHeader("Content-Length", String(body.length));
   response.writeHead(status).end(body);
@@ -342,6 +357,18 @@ test("standalone WASM browser integration", { timeout: 120_000 }, async (t) => {
     }
   });
 
+  await t.test("oversized chunked partial and metadata bodies are rejected", async () => {
+    behavior = { oversizedPartial: true };
+    serverGeneration = "oversized-partial";
+    const partial = await evaluate(`window.stores.createObjectStore({ key: 'refpy.zarr', signEndpoint: '${endpoint()}', generation: 'oversized-partial' }).get('zarr.json', 'bytes=0-9').then(() => null, (error) => error.message)`);
+    assert.match(partial, /exceeds 10 bytes/);
+    behavior = { oversizedMetadata: true };
+    serverGeneration = "oversized-metadata";
+    const metadata = await evaluate(`window.stores.createObjectStore({ key: 'refpy.zarr', signEndpoint: '${endpoint()}', generation: 'oversized-metadata' }).get('zarr.json', null).then(() => null, (error) => error.message)`);
+    assert.match(metadata, /exceeds 1048576 bytes/);
+    behavior = null;
+  });
+
   await t.test("native, overzoom and selected-band PNGs match native bytes", async () => {
     behavior = null;
     await open("render");
@@ -377,6 +404,54 @@ test("standalone WASM browser integration", { timeout: 120_000 }, async (t) => {
     assert.ok(!message.includes("secret-") && !message.includes("/object/"), message);
     await closeSession();
     behavior = null;
+  });
+
+  await t.test("post-open worker failure is terminal and close returns promptly", async () => {
+    serverGeneration = "worker-fatal";
+    const result = await evaluate(`(async () => {
+      const NativeWorker = window.Worker;
+      try {
+        window.Worker = new Proxy(NativeWorker, {
+          construct(target, args) {
+            const worker = Reflect.construct(target, args);
+            window.testWorker = worker;
+            window.testWorkerTerminate = worker.terminate.bind(worker);
+            window.testWorkerTerminations = 0;
+            worker.terminate = () => {
+              window.testWorkerTerminations++;
+              window.testWorkerTerminate();
+            };
+            return worker;
+          },
+        });
+        const session = await window.client.openRaster({ key: 'refpy.zarr', signEndpoint: '${endpoint()}', generation: 'worker-fatal' });
+        const pending = session.renderTile({ z: 0, x: 0, y: 0 });
+        window.testWorkerTerminate();
+        window.testWorker.dispatchEvent(new Event('error'));
+        const settle = (promise) => Promise.race([
+          promise.then(() => 'resolved', (error) => error.message),
+          new Promise((resolve) => setTimeout(() => resolve('timeout'), 250)),
+        ]);
+        const pendingError = await settle(pending);
+        const futureError = await settle(session.renderTile({ z: 0, x: 0, y: 0 }));
+        const closeResult = await Promise.race([
+          session.close().then(() => 'closed', (error) => error.message),
+          new Promise((resolve) => setTimeout(() => resolve('timeout'), 250)),
+        ]);
+        return { pendingError, futureError, closeResult, terminations: window.testWorkerTerminations };
+      } finally {
+        window.Worker = NativeWorker;
+        delete window.testWorker;
+        delete window.testWorkerTerminate;
+        delete window.testWorkerTerminations;
+      }
+    })()`);
+    assert.deepEqual(result, {
+      pendingError: "raster worker failed",
+      futureError: "raster worker failed",
+      closeResult: "closed",
+      terminations: 1,
+    });
   });
 
   await t.test("SQL has exact values, nodata NULL, read-only enforcement and caps", async () => {
@@ -464,6 +539,28 @@ test("standalone WASM browser integration", { timeout: 120_000 }, async (t) => {
     assert.equal(result.aborted, "AbortError");
     assert.match(result.malformed, /zarra:\/\/\/\{z\}\/\{x\}\/\{y\}\.png/);
     await closeSession();
+  });
+
+  await t.test("signed URLs reject userinfo before fetching objects", async () => {
+    serverGeneration = "userinfo";
+    const result = await evaluate(`(async () => {
+      const original = window.fetch;
+      let objectFetches = 0;
+      window.fetch = (input, init) => {
+        if (String(input).endsWith('/sign')) {
+          return Promise.resolve(new Response(JSON.stringify({ generation: 'userinfo', expires_at: Math.floor(Date.now() / 1000) + 60, objects: [{ path: 'zarr.json', url: 'https://alice:secret-userinfo@example.com/object?token=secret-userinfo' }] }), { status: 200, headers: { 'Content-Type': 'application/json' } }));
+        }
+        objectFetches++;
+        return Promise.resolve(new Response(new Uint8Array(), { status: 200 }));
+      };
+      try {
+        const message = await window.stores.createObjectStore({ key: 'refpy.zarr', signEndpoint: '${endpoint()}', generation: 'userinfo' }).get('zarr.json', null).then(() => null, (error) => error.message);
+        return { message, objectFetches };
+      } finally { window.fetch = original; }
+    })()`);
+    assert.match(result.message, /credentials/);
+    assert.equal(result.objectFetches, 0);
+    assert.ok(!result.message.includes("secret-userinfo") && !result.message.includes("alice"));
   });
 
   await t.test("non-loopback HTTP and redirects fail without leaking signed URLs", async () => {

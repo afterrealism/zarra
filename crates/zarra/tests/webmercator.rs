@@ -1,3 +1,5 @@
+#![cfg(feature = "local")]
+
 use zarra::create::webmercator::{
     level_shapes, native_maxzoom, pick_dst_nodata, tile_range_for, webmerc_res, webmerc_tilespan,
     WORLD,

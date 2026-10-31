@@ -1,6 +1,6 @@
 # Zarra
 
-Zarra converts georeferenced GeoTIFF/COG rasters into canonical multiscale Zarr v3 directories, reads their sharded arrays locally or over keyed HTTP, renders XYZ RGBA PNG tiles, and serves an embedded MapLibre viewer. The workspace contains the `zarra` library and the `zarra-cli` package, which installs a binary named `zarra`.
+Zarra converts georeferenced GeoTIFF/COG rasters into canonical multiscale Zarr v3 directories, reads their sharded arrays locally or over keyed HTTP, runs read-only SQLite queries over bounded raster windows, renders XYZ RGBA PNG tiles, and serves an embedded MapLibre viewer with local GeoTIFF uploads. The workspace contains the `zarra` library and the `zarra-cli` package, which installs a binary named `zarra`.
 
 Zarra uses the upstream Zarr format; it is not a new single-file raster format. The supported profile is defined in [SPEC.md](SPEC.md).
 
@@ -16,36 +16,41 @@ Install Rust 1.91.0 or newer. Conversion also requires the GDAL 3.13+ command-li
 
 ```sh
 cargo install --path crates/zarra-cli
-zarra convert input.tif -o output.zarr
+zarra convert input.tif -o output.zarr --resampling bilinear --zstd-level 5
 zarra info output.zarr
 zarra query output.zarr --level 0 --x 0 --y 0 --width 8 --height 8
+zarra sql output.zarr "SELECT band, AVG(value) FROM raster GROUP BY band"
 zarra tile output.zarr --z 0 --x 0 --y 0 -o tile.png
-zarra serve output.zarr --port 8090
+zarra serve output.zarr --port 8090 --upload-root uploads
 # or, for the committed reference fixture:
 npm --prefix example start
 ```
 
-`zarra serve` prints its loopback URL. The example launcher serves `testdata/refpy.zarr`; it does not implement another server or decoder.
+`zarra serve` prints its loopback URL. The example launcher serves `testdata/refpy.zarr` and enables no-overwrite uploads under `example/data/uploads`; it does not implement another server or decoder.
 
 ## Commands
 
 ```text
-zarra convert <INPUT.tif> -o <OUTPUT.zarr>
+zarra convert <INPUT.tif> -o <OUTPUT.zarr> [--maxzoom <Z>] \
+  [--resampling <auto|nearest|bilinear|cubic|average>] [--zstd-level <1-22>]
 zarra info <STORE> [--url <URL>]
 zarra query <STORE> [--url <URL>] --level <Z> --x <X0> --y <Y0> \
   --width <W> --height <H> [--bands <0,2,1>]
+zarra sql <STORE> [--url <URL>] <SQL> [--level <Z>] [--x <X0> --y <Y0>] \
+  [--width <W> --height <H>]
 zarra tile <STORE> [--url <URL>] --z <Z> --x <X> --y <Y> \
   [--bands <0,2,1>] -o <TILE.png>
-zarra serve <STORE> [--port <PORT>]
+zarra serve <STORE> [--port <PORT>] [--upload-root <DIRECTORY>]
 ```
 
-- `convert` probes a local raster, builds every zoom in a sibling temporary directory, validates the store, and publishes it with one local directory rename.
+- `convert` probes a local raster, builds every zoom in a sibling temporary directory, validates the store, and publishes it with one local directory rename. `--maxzoom` overrides native-zoom detection, `--resampling` selects the GDAL method (`auto` preserves the previous categorical/bilinear behavior), and `--zstd-level` accepts 1–22 (default 5).
 - `info` prints the root manifest and metadata for every level.
 - `query` writes an array-relative pixel window as JSON.
+- `sql` executes one read-only SQLite statement over `raster(x, y, band, value)` and writes bounded JSON rows.
 - `tile` renders one native or overzoomed XYZ tile as RGBA8 PNG.
-- `serve` binds `127.0.0.1` and provides tiles, manifest JSON, nested-object byte ranges, and the embedded viewer. It is a sequential demonstration server, not a production service. It accepts GET/HEAD/OPTIONS, caps request heads at 16 KiB, and applies 30-second per-connection I/O timeouts.
+- `serve` binds `127.0.0.1` and provides tiles, manifest JSON, nested-object byte ranges, and the embedded viewer. When `--upload-root` is supplied, the viewer can convert uploaded GeoTIFFs into that directory and switch the active store. It is a sequential demonstration server, not a production service. It accepts GET/HEAD/POST/OPTIONS, caps request heads at 16 KiB, upload bodies at 512 MiB, SQL bodies at 64 KiB, and applies 30-second per-connection I/O timeouts. Long conversion blocks other requests.
 
-`convert` and `serve` are local-only. For `info`, `query`, and `tile`, supply exactly one positional store or `--url`; supplying both or neither is an error.
+`convert` and `serve` are local-only. For `info`, `query`, `sql`, and `tile`, supply exactly one positional store or `--url`; supplying both or neither is an error.
 
 ### Optional HTTP stores
 
@@ -98,6 +103,23 @@ The result has `width * height * bands.length` values. `--bands 0,2,1` selects t
 
 The library also exposes full padded inner-chunk reads, chunk enumeration, band-planar chunk values, and checked neighborhood reads. Query results use `f64`; PNG rendering is a separate display operation.
 
+## SQL raster analytics
+
+`zarra sql` and the viewer's **SQL query** workspace expose one table per query:
+
+```text
+raster(x INTEGER, y INTEGER, band INTEGER, value REAL)
+```
+
+Coordinates are array-relative and bands are zero-based. NaN and declared nodata samples are loaded as `NULL`; use `COUNT(value)` for valid samples and `COUNT(*) - COUNT(value)` for missing samples. For example:
+
+```sql
+SELECT band, COUNT(value) AS valid, MIN(value), MAX(value), AVG(value)
+FROM raster GROUP BY band ORDER BY band;
+```
+
+The highest store level is the default. Omit both `--width` and `--height` for the whole level, or set both for a window; the viewer offers the same controls. Each query stages at most 1,048,576 band values in a fresh in-memory SQLite database. It permits one read-only statement, interrupts execution after 10 seconds, and returns at most 1,000 rows in an 8 MiB compact JSON body (including metadata and escaping). This is on-demand window analytics, not a persistent analytics sidecar or a second raster decoder.
+
 ## Tile encoding and output safety
 
 An empty tile band selection uses band 0 for one-band data or the first up-to-three bands for multiband data. Explicit selections contain one to three indices and may repeat.
@@ -114,13 +136,13 @@ Native and deep-overzoom tiles always read the appropriate maxzoom ancestor. PNG
 
 | Area | Included in 0.1.0 | Not included |
 |---|---|---|
-| Storage | Local directories; optional keyed HTTP reads | Signed S3/SigV4, uploads, authentication, PostgreSQL, deletion, cache invalidation, or remote publication |
-| Creation | GeoTIFF/COG through GDAL 3.13+ CLI | Native Rust GeoTIFF decoding, reprojection, or resampling |
+| Storage | Local directories; optional keyed HTTP reads; no-overwrite local conversion uploads | Signed S3/SigV4, remote uploads, authentication, PostgreSQL, deletion, cache invalidation, or remote publication |
+| Creation | GeoTIFF/COG through GDAL 3.13+ CLI; optional zoom, resampling, and ZSTD controls | Native Rust GeoTIFF decoding, reprojection, or resampling |
 | Arrays | Zarr v3; 2D/3D; default `/` keys; little-endian bytes; optional inner ZSTD; CRC32C sharding | Arbitrary Zarr versions, layouts, endianness, codecs, dimensionality, or storage transformers |
 | Values | `uint8`, `int8`, `uint16`, `int16`, `uint32`, `int32`, `float32`, `float64`; shared dtype/nodata | 64-bit integers, complex values, or mixed band dtypes/nodata |
-| Query | Level metadata, chunk enumeration/reads, windows, neighborhoods, ordered/repeated bands | SQL, an analytics sidecar, Arrow schema, or a `zarra-sql` crate |
+| Query | Level metadata, chunk enumeration/reads, windows, neighborhoods, ordered/repeated bands, bounded read-only SQLite analytics | Persistent analytics sidecar, Arrow schema, or a separate `zarra-sql` crate |
 | Rendering | XYZ zoom 0–22, native/overzoom, RG16/RGB8, first-band nodata alpha, 200 PNG/204 empty | Terrain color, hillshade, live rescaling, GPU shaders, or lossless scientific PNG values |
-| Viewer | MapLibre 4.7.1 raster source at opacity 0.92, extent fit, navigation, metadata and XYZ telemetry | deck.gl, basemaps, accounts, analytics, uploads, or a second JavaScript decoder |
+| Viewer | MapLibre 4.7.1 raster source at opacity 0.92, extent fit, navigation, metadata and XYZ telemetry, GeoTIFF upload/conversion controls, and SQL results | deck.gl, basemaps, accounts, cloud analytics, or a second JavaScript decoder |
 | Package | Core, CLI, embedded viewer, npm launcher/tests, docs and CI | WASM bindings, QGIS integration, production hosting, a Pages site, an xtask crate, or a multi-tenant service |
 
 The fixture-based tests are not large-raster benchmarks, and no performance, remote byte-budget, LRU-cache, or distributed atomicity claim is made. Zarra does not impose a total GDAL CPU, memory, disk, or time bound; its checked chunk/query allocation caps are not total process-memory limits.
@@ -147,7 +169,7 @@ cargo package -p zarra-cli --list --allow-dirty
 bash scripts/test-gdal.sh
 ```
 
-Node.js 20+ is required for the example tests, which build the real CLI and exercise the same `geo.js` module used by the browser. The GDAL script requires Docker and runs the ignored 2D/3D conversion, reopen/query, rendering, and no-clobber integration tests against GDAL 3.13.1 and Rust 1.91.0.
+Node.js 20+ is required for the example tests, which build the real CLI and exercise the same `geo.js` module used by the browser. The GDAL script requires Docker and runs the ignored 2D/3D conversion, custom conversion options, HTTP upload/active-store conversion, reopen/query, rendering, and no-clobber integration tests against GDAL 3.13.1 and Rust 1.91.0.
 
 `cargo package --list` checks file inclusion only. It is not publish readiness: actual packaging and publication remain gated by upstream `zarrs 0.23.15` availability. See [RELEASING.md](RELEASING.md).
 

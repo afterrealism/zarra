@@ -18,9 +18,9 @@ The package must provide one coherent local workflow:
 ```text
 GeoTIFF/COG
   → GDAL-probed, WebMercatorQuad-aligned multiscale Zarr v3 directory
-  → local or HTTP chunk/window/band queries
+  → local or HTTP chunk/window/band queries and bounded read-only SQLite analytics
   → XYZ RGBA8 PNG tiles
-  → loopback MapLibre raster viewer
+  → loopback MapLibre raster viewer with local GeoTIFF conversion uploads
 ```
 
 It is complete when all of these are demonstrated by automated checks:
@@ -37,20 +37,20 @@ It is complete when all of these are demonstrated by automated checks:
 ### Included
 
 - A `zarra` Rust library for conversion, local/HTTP querying, and tile rendering.
-- A `zarra` binary from `zarra-cli` with `convert`, `info`, `query`, `tile`, and `serve` commands.
+- A `zarra` binary from `zarra-cli` with `convert`, `info`, `query`, `sql`, `tile`, and `serve` commands.
 - Local directory stores and read-only keyed HTTP stores through an optional `http` feature.
 - Zarr v3 arrays in the canonical raster layout below, using maintained `zarrs` decoding rather than a new codec implementation.
 - GeoTIFF/COG conversion through GDAL CLI 3.13 or newer; GDAL 3.13.1 is the compatibility-test version.
-- A read-only loopback server and a small MapLibre 4.7.1 viewer.
+- A loopback server and a small MapLibre 4.7.1 viewer with optional local GeoTIFF uploads and read-only SQL.
 - Dual Apache-2.0/MIT packaging, documentation, fixture-based tests, and stable/MSRV/GDAL CI.
 
 ### Explicit non-goals
 
-- SQL or a `zarra-sql` crate. Tilify has array reads, not raster SQL.
+- A separate `zarra-sql` crate, persistent analytics database, Arrow sidecar, or distributed SQL execution. The CLI embeds bounded SQLite window queries directly.
 - A new binary format, EOF footer, A5 aggregate, FlatGeobuf body, or Arrow sidecar.
 - Native Rust reprojection, resampling, or GeoTIFF decoding in v1.
 - Arbitrary Zarr versions, chunk-key encodings, endianness, codecs, dimensionality, or storage transformers.
-- Signed S3/SigV4, uploads, authentication, PostgreSQL, deletion, cache invalidation, QGIS integration, production hosting, or a public multi-tenant service.
+- Signed S3/SigV4, remote uploads, authentication, PostgreSQL, deletion, cache invalidation, QGIS integration, production hosting, or a public multi-tenant service. Local no-overwrite conversion uploads are included only when `--upload-root` is configured.
 - Rust/WASM bindings or a second JavaScript Zarr decoder.
 - deck.gl, terrain colormaps, hillshade, live rescaling, or GPU shaders. The source viewer uses an ordinary MapLibre raster layer; those other capabilities are not implemented there.
 - Lossless scientific values in PNG. PNG bytes are losslessly compressed, but RG16/RGB8 encoding clamps and quantizes source values.
@@ -63,7 +63,8 @@ The Cargo workspace uses resolver 2, edition 2021, version 0.1.0, MSRV 1.91.0, a
 |---|---|---|
 | `zarrs` | `0.23.15` full-SHA backport `9e55886ecfc4e8f282632d6fb7682869ca69db4b`; default features off; `filesystem,sharding,crc32c,zstd` | Zarr metadata, keyed storage, sharded reads, codecs |
 | `zarrs_http` | `=0.3.1`; optional under `zarra/http` | Synchronous keyed HTTP storage |
-| `url` | 2; optional under `zarra/http` | Pre-network URL scheme and loopback validation |
+| `url` | 2; optional under `zarra/http`, also used by the CLI | Pre-network URL validation and upload parameter decoding |
+| `rusqlite` | `0.41.0`; `bundled,hooks,limits`; CLI only | Read-only in-memory SQLite raster analytics |
 | `serde` / `serde_json` | 1 | Root manifest and GDAL JSON |
 | `thiserror` | 2 | Typed library errors |
 | `png` | `=0.18.1` | RGBA8 PNG encoding and golden-test decoding |
@@ -137,7 +138,7 @@ Rules:
 
 ### 5.1 Input and process boundary
 
-`convert` accepts a nonempty local GeoTIFF/COG path and an output directory that does not exist. It rejects input without a CRS/GCP georeference, missing bands, mixed band dtypes, conflicting per-band nodata declarations, unsupported dtypes, non-finite geometry/statistics, and failed GDAL commands. It never invokes a shell. `GDAL_BIN_DIR`, when nonempty, selects the directory containing `gdalinfo`, `gdalwarp`, and `gdal_translate`; otherwise the tools are resolved on `PATH`.
+`convert` accepts a nonempty local GeoTIFF/COG path and an output directory that does not exist. `ConvertOptions` / `--maxzoom`, `--resampling`, and `--zstd-level` adjust the zoom ceiling, GDAL resampling, and inner compression. It rejects input without a CRS/GCP georeference, missing bands, mixed band dtypes, conflicting per-band nodata declarations, unsupported dtypes, non-finite geometry/statistics, invalid options, and failed GDAL commands. It never invokes a shell. `GDAL_BIN_DIR`, when nonempty, selects the directory containing `gdalinfo`, `gdalwarp`, and `gdal_translate`; otherwise the tools are resolved on `PATH`.
 
 The implementation uses `std::process::Command::output` and includes tool name, exit status, and bounded stderr in errors. Source paths and numeric parameters are individual arguments, not command text.
 
@@ -160,7 +161,7 @@ tile_span(z)  = SPAN / 2^z
 maxzoom       = clamp(ceil(log2(SPAN / (256 * native_pixel_meters))), 0, 22)
 ```
 
-Snap each level's 3857 AOI to inclusive tile indices with the source's `1e-9` upper-edge guard, then derive the exact tile-aligned warp extent. Levels are generated from `maxzoom` down to 0. Palette/thematic input uses nearest-neighbor resampling; other input uses bilinear.
+Snap each level's 3857 AOI to inclusive tile indices with the source's `1e-9` upper-edge guard, then derive the exact tile-aligned warp extent. Levels are generated from `maxzoom` down to 0. By default, native-zoom detection above supplies `maxzoom`; an explicit value from 0 through 22 overrides it. `auto` resampling uses nearest-neighbor for palette/thematic input and bilinear otherwise. `nearest`, `bilinear`, `cubic`, and `average` select that GDAL method explicitly.
 
 Propagate source nodata. If it is absent, floating-point output uses NaN. Integer output prefers 0 when outside every band's observed range; otherwise choose the nearest representable integer below all ranges or above all ranges. If the values span the whole dtype and no fill remains, continue without a declared fill rather than inventing one.
 
@@ -169,7 +170,7 @@ Propagate source nodata. If it is absent, floating-point output uses NaN. Intege
 For each level:
 
 ```text
-gdalwarp -t_srs EPSG:3857 -r <near|bilinear>
+gdalwarp -t_srs EPSG:3857 -r <near|bilinear|cubic|average>
          -tr <resolution> <resolution>
          -te <minx> <miny> <maxx> <maxy> -te_srs EPSG:3857
          [-dstnodata <value|nan>] -overwrite <source> <level.tif>
@@ -177,7 +178,7 @@ gdalwarp -t_srs EPSG:3857 -r <near|bilinear>
 gdal_translate -of ZARR -co FORMAT=ZARR_V3 -co ARRAY_NAME=data
                -co BLOCKSIZE=<outer-shape>
                -co SHARD_CHUNK_SHAPE=<inner-shape>
-               -co COMPRESS=ZSTD -co ZSTD_LEVEL=5
+               -co COMPRESS=ZSTD -co ZSTD_LEVEL=<1-22; default 5>
                <level.tif> <build>/<level>
 ```
 
@@ -280,6 +281,16 @@ The implementation uses `ArrayShardedReadableExtCache` for shard indexes. Before
 
 `open_url` accepts HTTPS, plus HTTP only for `localhost`, `127.0.0.0/8`, or `[::1]`; other schemes and non-loopback plain HTTP fail before network traffic. Userinfo, query strings, and fragments are rejected because keys are appended to the base URL. It calls `HTTPStore::set_batch_range_requests(false)` so servers receive only single-part ranges. Redirect policy is the upstream `reqwest` default; no HTTPS-downgrade guarantee is made in v1.
 
+### 7.1 SQL raster analytics
+
+The CLI's `sql` module reuses `read_window`; it does not decode Zarr independently or create a persistent database. Each request selects a level (maximum by default), array-relative `x`/`y` (zero by default), and either both `width`/`height` or neither for the whole level. At most 1,048,576 band values are staged in fresh in-memory SQLite as:
+
+```text
+raster(x INTEGER NOT NULL, y INTEGER NOT NULL, band INTEGER NOT NULL, value REAL)
+```
+
+NaN and declared numeric nodata are inserted as `NULL`, using the renderer's `1e-9` nodata comparison; other finite/infinite samples retain their values. One read-only statement is prepared with rusqlite, multiple statements and non-read-only statements are rejected, SQLite `query_only` is enabled, and a progress handler interrupts execution after 10 seconds. JSON contains column names, rows, a truncation flag, the resolved window, and source-value count. Results are capped at 1,000 rows and an 8 MiB compact JSON body, with exact serialized sizing that includes columns, framing, escaping, and the CLI's trailing newline. Oversized result-column metadata is an error, and an over-budget row is discarded before all its values are accumulated. Non-finite real results use the same string representation as window JSON, and blobs use hexadecimal text.
+
 ## 8. Tile-rendering contract
 
 ```rust
@@ -315,41 +326,48 @@ Packing is nearest-neighbor and produces an `inner × inner` RGBA8 buffer:
 ## 9. CLI contract
 
 ```sh
-zarra convert <INPUT.tif> -o <OUTPUT.zarr>
+zarra convert <INPUT.tif> -o <OUTPUT.zarr> [--maxzoom <Z>] \
+  [--resampling <auto|nearest|bilinear|cubic|average>] [--zstd-level <1-22>]
 zarra info <STORE> [--url <HTTPS_OR_LOOPBACK_HTTP_URL>]
 zarra query <STORE> [--url <URL>] --level <Z> --x <X0> --y <Y0> \
   --width <W> --height <H> [--bands <0,2,1>]
+zarra sql <STORE> [--url <URL>] <SQL> [--level <Z>] [--x <X0> --y <Y0>] \
+  [--width <W> --height <H>]
 zarra tile <STORE> [--url <URL>] --z <Z> --x <X> --y <Y> \
   [--bands <0,2,1>] -o <TILE.png>
-zarra serve <STORE> [--port <PORT>]
+zarra serve <STORE> [--port <PORT>] [--upload-root <DIRECTORY>]
 ```
 
-A positional store and `--url` are mutually exclusive and one is required for `info`, `query`, and `tile`. `convert` and `serve` are local-only. Query JSON is streamed to stdout with level, x/y/width/height, ordered bands, and row-major band-interleaved values; non-finite samples are emitted as the strings `"NaN"`, `"Infinity"`, or `"-Infinity"`, never invalid JSON. `tile` writes a new file without clobbering an existing path and prints `empty` instead of creating a file for an empty tile. Errors produce one readable `error: …` line on stderr and a nonzero exit code.
+A positional store and `--url` are mutually exclusive and one is required for `info`, `query`, `sql`, and `tile`. `convert` and `serve` are local-only. Query JSON is streamed to stdout with level, x/y/width/height, ordered bands, and row-major band-interleaved values; non-finite samples are emitted as the strings `"NaN"`, `"Infinity"`, or `"-Infinity"`, never invalid JSON. SQL emits the bounded JSON described in §7.1. `tile` writes a new file without clobbering an existing path and prints `empty` instead of creating a file for an empty tile. Errors produce one readable `error: …` line on stderr and a nonzero exit code.
 
 `serve` binds `127.0.0.1`; port 0 is allowed for tests and the actual bound URL is printed. It is a sequential, one-request-per-connection demonstration server with 16 KiB request-head and 30-second per-connection I/O limits.
 
 ## 10. HTTP and viewer contract
 
-The server supports GET, HEAD, and OPTIONS only:
+The server supports GET, HEAD, POST, and OPTIONS:
 
 | Route | Behavior |
 |---|---|
-| `/api/store` | JSON manifest plus `"tiles":"/raster/{z}/{x}/{y}.png"`; `Cache-Control: no-store` |
+| `/api/store` | JSON manifest plus `"tiles":"/raster/{z}/{x}/{y}.png"`, active `store_name`, and `upload_enabled`; `Cache-Control: no-store` |
+| `/api/sql` | POST one JSON SQL request; bounded JSON rows, 400 invalid/read-write SQL, 502 raster/SQLite staging failure |
+| `/api/uploads?filename=…&output=…&maxzoom=…&resampling=…&zstd_level=…` | POST one raw GeoTIFF body when `--upload-root` is enabled; 201 converted/active store, 400 invalid input, 403 disabled/cross-site, 409 existing output, 413 oversized |
 | `/raster/{z}/{x}/{y}.png[?bands=…]` | 200 `image/png`, 204 empty, 400 invalid coords/bands, 502 read/decode/encode error |
 | `/store/<nested-key>` | Root manifest/array/shard bytes; full 200, single-range 206, HEAD, 404, 403 traversal, 416 unsatisfiable |
 | `/`, `/index.html`, `/app.js`, `/geo.js`, `/styles.css`, `/favicon.svg` | Embedded viewer assets; no-cache |
 | `/vendor/maplibre-gl.js`, `/vendor/maplibre-gl.css`, `/vendor/maplibre-LICENSE.txt` | Embedded pinned MapLibre 4.7.1 assets and license |
 
-Successful tile and empty responses use `Cache-Control: public, max-age=3600, s-maxage=86400`. All supported routes send `Access-Control-Allow-Origin: *`; OPTIONS also allows GET/HEAD and the Range header, and exposes Accept-Ranges, Content-Length, and Content-Range. Raw object responses include `Accept-Ranges: bytes` and accurate `Content-Length`/`Content-Range`. Only one range is accepted; malformed ranges are ignored per the server helper's documented rule, and well-formed unsatisfiable ranges return 416.
+Successful tile and empty responses use `Cache-Control: no-cache` so an active-store switch cannot reuse an earlier store's fresh tile under the same XYZ URL. All supported routes send `Access-Control-Allow-Origin: *`; OPTIONS also allows GET/HEAD/POST and the Range/Content-Type headers, and exposes Accept-Ranges, Content-Length, and Content-Range. Raw object responses include `Accept-Ranges: bytes` and accurate `Content-Length`/`Content-Range`. Only one range is accepted; malformed ranges are ignored per the server helper's documented rule, and well-formed unsatisfiable ranges return 416. POST bodies require Content-Length and are capped at 512 MiB for uploads and 64 KiB for SQL. Cross-site POSTs are rejected using Sec-Fetch-Site and same-authority Origin validation; every POST also requires Host to equal the actual bound `127.0.0.1:port` listener, preventing DNS-rebinding hostnames from passing that check.
 
-Static assets are an explicit allowlist. Object keys are percent-decoded once; NUL, backslash, `.`/`..` escapes, absolute paths, non-files, and symlink escapes are rejected. No directory listing, upload, mutation, multipart range, or production hardening is claimed.
+Static assets are an explicit allowlist. Object keys are percent-decoded once; NUL, backslash, `.`/`..` escapes, absolute paths, non-files, and symlink escapes are rejected. Upload filenames/output names are safe basenames, input is limited to `.tif`/`.tiff`, and output must end in `.zarr` and not exist. Conversion writes only beneath the configured upload root and switches the active store after reopening it successfully. No directory listing, remote publication, multipart range, or production hardening is claimed.
 
 The viewer is served by `zarra serve`; `example/` contains only its npm launcher/tests and documentation, not a second server or decoder. It must:
 
 - Fetch `/api/store` and register an ordinary MapLibre `{type:"raster"}` source using the real `/raster/{z}/{x}/{y}.png` template, declared `tile_size`, minzoom/maxzoom, and opacity 0.92.
 - Fit the declared extent or a documented world fallback and provide MapLibre navigation plus a native fit button.
 - Show dtype, bands, level range, current integer zoom and XYZ under the pointer, loading state, and readable errors.
-- Use no basemap, analytics, account UI, upload UI, or fabricated request ledger.
+- When uploads are enabled, accept one GeoTIFF, expose output name, optional maximum zoom, resampling, and ZSTD level, then reload the converted active store.
+- Run read-only SQL against actual raster values with level/window controls, example queries, and bounded accessible result tables.
+- Use no basemap, account UI, external analytics, fabricated request ledger, or second JavaScript decoder.
 - Use pinned local MapLibre JavaScript/CSS with its license, visible keyboard focus, labeled native controls, responsive layout, and `prefers-reduced-motion`.
 
 ## 11. Fixture and verification contract
@@ -386,9 +404,9 @@ The install and package-list commands verify local/path usage and file inclusion
 A GDAL 3.13.1 container job runs the explicitly ignored integration tests:
 
 ```sh
-cargo test -p zarra-cli --test gdal --all-features -- --ignored --nocapture
+cargo test -p zarra-cli --all-features -- --ignored --nocapture
 ```
 
-Those tests convert `sample.tif`, derive a three-band COG with repeated `-b 1` selections, reopen both outputs, verify 2D/3D layout and metadata, query known samples, and fetch native and overzoom PNGs. They also prove that a second conversion to the same output fails without changing the first output. The ordinary unit/integration suites do not require GDAL to be installed.
+Those tests convert `sample.tif`, derive a three-band COG with repeated `-b 1` selections, reopen both outputs, verify 2D/3D layout and metadata, apply custom zoom/resampling/ZSTD options, query known samples, and fetch native and overzoom PNGs. The HTTP upload test converts a real GeoTIFF with custom options, reopens it as the active store, runs SQL against it, and proves invalid options and repeated output names fail without replacing the first output. The ordinary unit/integration suites do not require GDAL to be installed.
 
-The final browser smoke uses `zarra serve testdata/refpy.zarr --port 8090`: load the printed loopback URL, confirm a nonblank 16×16-data map, use zoom/fit and keyboard navigation, resize to a mobile viewport, and confirm no failed local asset/tile requests. This visual check complements, rather than replaces, golden pixel and HTTP tests.
+The final browser smoke uses `zarra serve testdata/refpy.zarr --port 8090 --upload-root example/data/uploads`: load the printed loopback URL, confirm a nonblank 16×16-data map, use zoom/fit and keyboard navigation, inspect the mobile upload dialog, and run a real SQL query with visible results. Confirm no failed local asset/tile/SQL requests. This visual check complements, rather than replaces, golden pixel, GDAL upload, and HTTP tests.

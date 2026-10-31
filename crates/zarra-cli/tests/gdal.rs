@@ -316,3 +316,40 @@ fn converts_2d_and_3d_stores_and_never_overwrites() -> TestResult {
     assert_eq!(snapshot(Path::new(FIXTURE_DATA))?, fixture_before);
     Ok(())
 }
+
+#[test]
+#[ignore = "requires GDAL >= 3.13"]
+fn convert_cli_applies_zoom_resampling_and_compression_options() -> TestResult {
+    let temporary = tempfile::tempdir()?;
+    let output = temporary.path().join("custom.zarr");
+    let converted = Command::new(env!("CARGO_BIN_EXE_zarra"))
+        .arg("convert")
+        .arg(SAMPLE)
+        .arg("-o")
+        .arg(&output)
+        .args([
+            "--maxzoom",
+            "0",
+            "--resampling",
+            "nearest",
+            "--zstd-level",
+            "1",
+        ])
+        .output()?;
+    assert_conversion_success(&converted, 1);
+    let root = read_json(&output.join("zarr.json"))?;
+    assert_eq!(root["attributes"]["zarra"]["maxzoom"], 0);
+    assert_eq!(
+        root["attributes"]["zarra"]["levels"]
+            .as_array()
+            .ok_or("missing levels")?
+            .len(),
+        1
+    );
+    let level = read_json(&output.join("0/zarr.json"))?;
+    assert_eq!(
+        level["codecs"][0]["configuration"]["codecs"][1]["configuration"]["level"],
+        1
+    );
+    Ok(())
+}

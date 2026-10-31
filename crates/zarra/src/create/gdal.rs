@@ -7,6 +7,7 @@ use std::process::Command;
 use serde_json::Value;
 
 use super::webmercator::{level_shapes, TileRange};
+use super::ConvertOptions;
 use crate::{DType, Error, Nodata, Result};
 
 const STDERR_LIMIT: usize = 8 * 1024;
@@ -135,6 +136,13 @@ impl SourceInfo {
     }
 }
 
+pub(crate) struct LevelRequest<'a> {
+    pub(crate) source: &'a SourceInfo,
+    pub(crate) range: TileRange,
+    pub(crate) nodata: Option<Nodata>,
+    pub(crate) options: ConvertOptions,
+}
+
 pub(crate) struct Gdal {
     bin_dir: Option<PathBuf>,
 }
@@ -210,21 +218,21 @@ impl Gdal {
         input: &Path,
         work: &Path,
         z: u8,
-        source: &SourceInfo,
-        range: TileRange,
-        nodata: Option<Nodata>,
+        request: LevelRequest<'_>,
     ) -> Result<()> {
+        let LevelRequest {
+            source,
+            range,
+            nodata,
+            options,
+        } = request;
         let resolution = super::webmercator::webmerc_res(z)?;
         let level_tif = work.join(format!("_warp_{z}.tif"));
         let mut warp = vec![
             OsString::from("-t_srs"),
             OsString::from("EPSG:3857"),
             OsString::from("-r"),
-            OsString::from(if source.categorical {
-                "near"
-            } else {
-                "bilinear"
-            }),
+            OsString::from(options.resampling.gdal(source.categorical)),
             OsString::from("-tr"),
             gdal_number(resolution),
             gdal_number(resolution),
@@ -268,7 +276,7 @@ impl Gdal {
                 OsString::from("-co"),
                 OsString::from("COMPRESS=ZSTD"),
                 OsString::from("-co"),
-                OsString::from("ZSTD_LEVEL=5"),
+                OsString::from(format!("ZSTD_LEVEL={}", options.zstd_level)),
                 level_tif.as_os_str().to_os_string(),
                 level_output.as_os_str().to_os_string(),
             ],
@@ -598,5 +606,85 @@ mod tests {
             invalid["geoTransform"][1] = pixel_size;
             assert!(SourceInfo::from_gdal_json(&original(vec![band("Byte")]), &invalid).is_err());
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn emit_level_passes_selected_resampling_and_zstd_to_gdal() -> TestResult {
+        use std::fs;
+        use std::os::unix::fs::PermissionsExt;
+
+        use super::super::webmercator::TileRange;
+        use super::{Gdal, LevelRequest};
+        use crate::{ConvertOptions, Resampling};
+
+        let temporary = tempfile::tempdir()?;
+        let bin = temporary.path().join("bin");
+        fs::create_dir(&bin)?;
+        for (name, script) in [
+            (
+                "gdalwarp",
+                "#!/bin/sh\ndir=\"$(dirname \"$0\")\"\nprintf '%s\\n' \"$@\" > \"$dir/warp.args\"\nfor last; do :; done\n: > \"$last\"\n",
+            ),
+            (
+                "gdal_translate",
+                "#!/bin/sh\ndir=\"$(dirname \"$0\")\"\nprintf '%s\\n' \"$@\" > \"$dir/translate.args\"\n",
+            ),
+        ] {
+            let path = bin.join(name);
+            fs::write(&path, script)?;
+            let mut permissions = fs::metadata(&path)?.permissions();
+            permissions.set_mode(0o755);
+            fs::set_permissions(path, permissions)?;
+        }
+        let input = temporary.path().join("input.tif");
+        fs::write(&input, b"fake")?;
+        let source = SourceInfo::from_gdal_json(&original(vec![band("Byte")]), &warped())?;
+        let range = TileRange {
+            tx0: 0,
+            tx1: 0,
+            ty0: 0,
+            ty1: 0,
+            te_minx: 0.0,
+            te_miny: 0.0,
+            te_maxx: 1.0,
+            te_maxy: 1.0,
+        };
+        for (resampling, expected) in [
+            (Resampling::Nearest, "near"),
+            (Resampling::Average, "average"),
+        ] {
+            let work = temporary.path().join(expected);
+            fs::create_dir(&work)?;
+            let gdal = Gdal {
+                bin_dir: Some(bin.clone()),
+            };
+            gdal.emit_level(
+                &input,
+                &work,
+                0,
+                LevelRequest {
+                    source: &source,
+                    range,
+                    nodata: None,
+                    options: ConvertOptions {
+                        maxzoom: Some(0),
+                        resampling,
+                        zstd_level: 1,
+                    },
+                },
+            )?;
+            let warp_args = fs::read_to_string(bin.join("warp.args"))?;
+            assert!(
+                warp_args.contains(&format!("-r\n{expected}\n")),
+                "{warp_args}"
+            );
+            let translate_args = fs::read_to_string(bin.join("translate.args"))?;
+            assert!(
+                translate_args.contains("ZSTD_LEVEL=1\n"),
+                "{translate_args}"
+            );
+        }
+        Ok(())
     }
 }

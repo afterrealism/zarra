@@ -22,7 +22,7 @@ const REPO_ROOT = path.resolve(fileURLToPath(new URL("..", import.meta.url)));
 const BINARY = path.join(REPO_ROOT, "target", "debug", process.platform === "win32" ? "zarra.exe" : "zarra");
 const FIXTURE = path.join(REPO_ROOT, "testdata", "refpy.zarr");
 const ASSETS = path.join(REPO_ROOT, "crates", "zarra-cli", "assets");
-const TILE_CACHE = "public, max-age=3600, s-maxage=86400";
+const TILE_CACHE = "no-cache";
 
 let canonicalServer;
 let sparseServer;
@@ -151,6 +151,29 @@ test("the API returns the manifest and real tile template", async () => {
   assert.equal(manifest.tiles, "/raster/{z}/{x}/{y}.png");
   assert.equal(manifest.tile_size, 16);
   assert.equal(manifest.maxzoom, 0);
+  assert.equal(manifest.store_name, "refpy.zarr");
+  assert.equal(manifest.upload_enabled, false);
+});
+
+test("the SQL API queries actual pixels and rejects writes", async () => {
+  const response = await request("/api/sql", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ sql: "SELECT x, y, band, value FROM raster", x: 2, y: 2, width: 1, height: 1 }),
+  });
+  assert.equal(response.status, 200);
+  const result = await response.json();
+  assert.deepEqual(result.columns, ["x", "y", "band", "value"]);
+  assert.deepEqual(result.rows, [[2, 2, 0, 2002]]);
+  assert.equal(result.source_values, 1);
+
+  const rejected = await request("/api/sql", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ sql: "DELETE FROM raster" }),
+  });
+  assert.equal(rejected.status, 400);
+  assert.match((await rejected.json()).error, /read.only|readonly|SQL/i);
 });
 
 test("native, deep-overzoom, repeated, and b-prefixed band tiles are real PNGs", async () => {
@@ -275,7 +298,8 @@ test("OPTIONS, CORS, mutation rejection, and unknown routes are explicit", async
     assert.equal(response.headers.get("content-length"), null, route);
     assert.match(response.headers.get("access-control-allow-methods"), /GET/);
     assert.match(response.headers.get("access-control-allow-methods"), /HEAD/);
-    assert.equal(response.headers.get("access-control-allow-headers"), "Range");
+    assert.match(response.headers.get("access-control-allow-methods"), /POST/);
+    assert.equal(response.headers.get("access-control-allow-headers"), "Range, Content-Type");
     const exposed = response.headers.get("access-control-expose-headers");
     for (const name of ["Accept-Ranges", "Content-Length", "Content-Range"]) assert.match(exposed, new RegExp(name));
   }

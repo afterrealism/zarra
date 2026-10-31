@@ -19,7 +19,7 @@ The Tilify Everything source checkout was the behavioral reference. Zarra does n
 
 ## FGBA
 
-FGBA supplied the core/CLI/example package pattern and the structural reference for a bounded loopback range server, especially its workspace manifests, `crates/fgba-cli/src/main.rs`, `crates/fgba-cli/src/serve.rs`, HTTP tests, per-crate fixture copies, and dependency-free Node example tests.
+FGBA supplied the core/CLI/example package pattern and the structural reference for a bounded loopback range server, especially its workspace manifests, `crates/fgba-cli/src/main.rs`, `crates/fgba-cli/src/serve.rs`, HTTP tests, per-crate fixture copies, and dependency-free Node example tests. Its local upload/conversion and read-only SQL workspaces also informed the corresponding Zarra workflow.
 
 Reference repository: `https://github.com/afterrealism/fgba`. No FGB/A5 code is in Zarra's runtime data path; the storage model here is a Zarr directory/prefix, not FGBA's single-file layout.
 
@@ -36,6 +36,10 @@ Reference repository: `https://github.com/afterrealism/fgba`. No FGB/A5 code is 
 
 - [GDAL](https://gdal.org/) supplies `gdalinfo`, `gdalwarp`, and `gdal_translate` for probing, reprojection/resampling, and Zarr emission. Zarra requires GDAL 3.13+ and uses the GDAL 3.13.1 container for compatibility tests. GDAL is distributed under its [MIT-style license](https://github.com/OSGeo/gdal/blob/v3.13.1/LICENSE.TXT).
 - [`png` 0.18.1](https://crates.io/crates/png/0.18.1) encodes the renderer's RGBA8 output and decodes golden-test PNGs. The crate is licensed under MIT OR Apache-2.0.
+
+## SQLite raster analytics
+
+- [`rusqlite` 0.41.0](https://crates.io/crates/rusqlite/0.41.0) and its bundled SQLite library execute read-only SQL over a bounded in-memory raster window. Zarra stages values through its existing `RasterStore::read_window` API; there is no second raster decoder, persistent SQL database, DataFusion plan, or FGBA analytics code in this path. Rusqlite is licensed under MIT; SQLite is in the public domain.
 
 ## MapLibre and bundled notices
 

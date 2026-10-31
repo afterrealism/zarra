@@ -21,11 +21,13 @@ doc = false
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }
+rusqlite = { version = "0.41.0", features = ["bundled", "hooks", "limits"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+tempfile = "3"
+url = "2"
 zarra = { version = "0.1.0", path = "../zarra", features = ["http"] }
 
 [dev-dependencies]
 png = "=0.18.1"
 reqwest = { version = "0.12", default-features = false, features = ["blocking"] }
-tempfile = "3"

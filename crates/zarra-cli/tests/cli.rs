@@ -136,6 +136,50 @@ fn query_emits_nan_padding_as_json_strings() -> TestResult {
 }
 
 #[test]
+fn sql_cli_reads_real_pixels_and_rejects_mutation() -> TestResult {
+    let json = success_json(&[
+        "sql",
+        STORE,
+        "SELECT x, y, band, value FROM raster",
+        "--x",
+        "2",
+        "--y",
+        "2",
+        "--width",
+        "1",
+        "--height",
+        "1",
+    ])?;
+    assert_eq!(
+        json["columns"],
+        serde_json::json!(["x", "y", "band", "value"])
+    );
+    assert_eq!(json["rows"], serde_json::json!([[2, 2, 0, 2002.0]]));
+    assert_eq!(json["source_values"], 1);
+    assert_failure(&["sql", STORE, "DELETE FROM raster"])
+}
+
+#[test]
+fn sql_cli_enforces_the_serialized_json_byte_budget() -> TestResult {
+    let output = run(&[
+        "sql",
+        STORE,
+        "SELECT printf('%1000000s', char(1)) AS escaped FROM raster LIMIT 100",
+    ])?;
+    assert!(
+        output.status.success(),
+        "SQL failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(output.stdout.len() <= 8 * 1024 * 1024);
+    let json: Value = serde_json::from_slice(&output.stdout)?;
+    assert_eq!(json["truncated"], true);
+    let rows = json["rows"].as_array().ok_or("rows must be an array")?;
+    assert!(!rows.is_empty() && rows.len() < 100);
+    Ok(())
+}
+
+#[test]
 fn invalid_sources_dimensions_bands_levels_and_urls_fail() -> TestResult {
     for arguments in [
         vec!["info"],

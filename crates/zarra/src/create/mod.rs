@@ -10,11 +10,95 @@ use std::path::{Path, PathBuf};
 use serde_json::{Map, Value};
 use tempfile::Builder;
 
-use self::gdal::Gdal;
+use self::gdal::{Gdal, LevelRequest};
 use self::webmercator::{native_maxzoom, pick_dst_nodata, tile_range_for};
 use crate::{
     Channels, DType, Error, LevelMeta, LevelOffset, Nodata, RasterManifest, Result, TileEncoding,
 };
+
+/// GDAL resampling used while building each Web Mercator level.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Resampling {
+    /// Use nearest-neighbor for categorical rasters and bilinear otherwise.
+    #[default]
+    Auto,
+    /// Preserve the nearest source pixel value.
+    Nearest,
+    /// Interpolate from the nearest four source pixels.
+    Bilinear,
+    /// Interpolate with GDAL's cubic convolution kernel.
+    Cubic,
+    /// Average non-nodata contributing source pixels.
+    Average,
+}
+
+impl Resampling {
+    fn gdal(self, categorical: bool) -> &'static str {
+        match self {
+            Self::Auto if categorical => "near",
+            Self::Auto | Self::Bilinear => "bilinear",
+            Self::Nearest => "near",
+            Self::Cubic => "cubic",
+            Self::Average => "average",
+        }
+    }
+}
+
+impl std::str::FromStr for Resampling {
+    type Err = Error;
+
+    fn from_str(text: &str) -> Result<Self> {
+        match text {
+            "auto" => Ok(Self::Auto),
+            "nearest" => Ok(Self::Nearest),
+            "bilinear" => Ok(Self::Bilinear),
+            "cubic" => Ok(Self::Cubic),
+            "average" => Ok(Self::Average),
+            _ => Err(Error::InvalidInput(format!(
+                "unknown resampling method {text:?}; expected auto, nearest, bilinear, cubic, or average"
+            ))),
+        }
+    }
+}
+
+/// Adjustable GDAL conversion settings. Defaults preserve the original profile.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ConvertOptions {
+    /// Highest zoom to emit, or the source-derived native zoom when omitted.
+    pub maxzoom: Option<u8>,
+    /// Resampling applied independently at every level.
+    pub resampling: Resampling,
+    /// Inner-chunk ZSTD compression level from 1 through 22.
+    pub zstd_level: u8,
+}
+
+impl Default for ConvertOptions {
+    fn default() -> Self {
+        Self {
+            maxzoom: None,
+            resampling: Resampling::Auto,
+            zstd_level: 5,
+        }
+    }
+}
+
+impl ConvertOptions {
+    fn validate(self) -> Result<()> {
+        if self.maxzoom.is_some_and(|zoom| zoom > 22) {
+            return Err(Error::InvalidInput(
+                "maxzoom must be between 0 and 22".into(),
+            ));
+        }
+        // GDAL's Zarr driver accepts ZSTD_LEVEL=1-22.
+        // Source: https://gdal.org/en/stable/drivers/raster/zarr.html#creation-options
+        if !(1..=22).contains(&self.zstd_level) {
+            return Err(Error::InvalidInput(
+                "zstd_level must be between 1 and 22".into(),
+            ));
+        }
+        Ok(())
+    }
+}
 
 /// Summary of one fully validated, newly published raster store.
 #[derive(Debug)]
@@ -34,6 +118,19 @@ pub struct BuildReport {
 /// GDAL is invoked directly with argument arrays, never through a shell. The
 /// output must not exist; no overwrite or remote-publication mode is provided.
 pub fn convert(input: &Path, output: &Path) -> Result<BuildReport> {
+    convert_with_options(input, output, ConvertOptions::default())
+}
+
+/// Converts with an explicit zoom ceiling, resampling method, and ZSTD level.
+///
+/// The output must not exist. Options are validated before any build directory
+/// or output store is created.
+pub fn convert_with_options(
+    input: &Path,
+    output: &Path,
+    options: ConvertOptions,
+) -> Result<BuildReport> {
+    options.validate()?;
     let input = fs::canonicalize(input)?;
     let input_metadata = fs::metadata(&input)?;
     if !input_metadata.is_file() || input_metadata.len() == 0 {
@@ -65,11 +162,24 @@ pub fn convert(input: &Path, output: &Path) -> Result<BuildReport> {
         Some(nodata) => Some(nodata),
         None => pick_dst_nodata(source.dtype, &source.per_band_range)?,
     };
-    let maxzoom = native_maxzoom(source.px)?;
+    let maxzoom = match options.maxzoom {
+        Some(maxzoom) => maxzoom,
+        None => native_maxzoom(source.px)?,
+    };
     let mut levels = Vec::with_capacity(usize::from(maxzoom) + 1);
     for z in (0..=maxzoom).rev() {
         let range = tile_range_for(z, source.minx, source.miny, source.maxx, source.maxy)?;
-        gdal.emit_level(&input, &work, z, &source, range, nodata)?;
+        gdal.emit_level(
+            &input,
+            &work,
+            z,
+            LevelRequest {
+                source: &source,
+                range,
+                nodata,
+                options,
+            },
+        )?;
         levels.push(LevelOffset {
             z,
             xoff: range.tx0,
@@ -238,4 +348,55 @@ fn count_files(directory: &Path) -> Result<u64> {
         }
     }
     Ok(count)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ConvertOptions, Resampling};
+
+    #[test]
+    fn conversion_defaults_and_resampling_names_are_stable() {
+        let defaults = ConvertOptions::default();
+        assert_eq!(defaults.maxzoom, None);
+        assert_eq!(defaults.resampling, Resampling::Auto);
+        assert_eq!(defaults.zstd_level, 5);
+        assert_eq!(Resampling::Auto.gdal(true), "near");
+        assert_eq!(Resampling::Auto.gdal(false), "bilinear");
+        assert_eq!(
+            "nearest".parse::<Resampling>().ok(),
+            Some(Resampling::Nearest)
+        );
+        assert_eq!(
+            "average".parse::<Resampling>().ok(),
+            Some(Resampling::Average)
+        );
+        assert!("lanczos".parse::<Resampling>().is_err());
+    }
+
+    #[test]
+    fn conversion_options_reject_out_of_profile_values() {
+        for options in [
+            ConvertOptions {
+                maxzoom: Some(23),
+                ..ConvertOptions::default()
+            },
+            ConvertOptions {
+                zstd_level: 0,
+                ..ConvertOptions::default()
+            },
+            ConvertOptions {
+                zstd_level: 23,
+                ..ConvertOptions::default()
+            },
+        ] {
+            assert!(options.validate().is_err(), "{options:?}");
+        }
+        assert!(ConvertOptions {
+            maxzoom: Some(22),
+            zstd_level: 22,
+            ..ConvertOptions::default()
+        }
+        .validate()
+        .is_ok());
+    }
 }

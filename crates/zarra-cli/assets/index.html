@@ -4,7 +4,8 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="referrer" content="no-referrer">
-  <title>Zarra — local raster viewer</title>
+  <meta name="description" content="Upload GeoTIFF rasters, convert them to Zarr v3 with adjustable GDAL settings, explore tiles, and run read-only SQL.">
+  <title>Zarra — raster workbench</title>
   <link rel="icon" href="/favicon.svg" type="image/svg+xml">
   <link rel="stylesheet" href="/vendor/maplibre-gl.css">
   <link rel="stylesheet" href="/styles.css">
@@ -12,9 +13,14 @@
 <body>
   <a class="skip-link" href="#viewer">Skip to raster viewer</a>
   <header class="site-header">
-    <p class="eyebrow">Local Zarr v3 raster</p>
-    <h1>Zarra</h1>
-    <p>Real XYZ tiles, rendered by the local Rust server.</p>
+    <div class="brand">
+      <h1>Zarra</h1>
+      <p>GeoTIFF to Zarr v3. Explore the raster. Query the pixels.</p>
+    </div>
+    <div class="header-actions" aria-label="Raster actions">
+      <button id="upload-open" class="secondary" type="button" disabled>Upload GeoTIFF</button>
+      <button id="sql-open" class="secondary" type="button" disabled>SQL query</button>
+    </div>
   </header>
   <main id="viewer" class="layout" tabindex="-1">
     <section class="map-panel" aria-labelledby="map-title">
@@ -29,6 +35,7 @@
       <section>
         <h2 id="metadata-title">Store metadata</h2>
         <dl>
+          <div><dt>Store</dt><dd id="store-name">—</dd></div>
           <div><dt>Data type</dt><dd id="dtype">—</dd></div>
           <div><dt>Bands</dt><dd id="bands">—</dd></div>
           <div><dt>Levels</dt><dd id="levels">—</dd></div>
@@ -48,6 +55,116 @@
       <a class="license" href="/vendor/maplibre-LICENSE.txt">MapLibre 4.7.1 license</a>
     </aside>
   </main>
+  <dialog id="upload-dialog" class="workspace-dialog" aria-labelledby="upload-title">
+    <div class="dialog-head">
+      <div>
+        <h2 id="upload-title">Convert a GeoTIFF</h2>
+        <p>Build a local multiscale Zarr v3 store and open it in the map.</p>
+      </div>
+      <button id="upload-close" class="icon-button" type="button" aria-label="Close GeoTIFF conversion">Close</button>
+    </div>
+    <form id="upload-form" class="dialog-body">
+      <div class="field">
+        <label for="geotiff-file">GeoTIFF or COG</label>
+        <input id="geotiff-file" type="file" accept=".tif,.tiff,image/tiff" required aria-describedby="file-help">
+        <small id="file-help">One georeferenced .tif or .tiff file, up to 512 MiB. Conversion uses the local GDAL 3.13+ tools.</small>
+      </div>
+      <div class="field">
+        <label for="output-name">New Zarr directory name</label>
+        <input id="output-name" type="text" value="raster.zarr" required maxlength="255" autocomplete="off">
+        <small>A basename ending in .zarr. Existing outputs are never overwritten.</small>
+      </div>
+      <div class="form-grid three-columns">
+        <div class="field">
+          <label for="max-zoom">Maximum zoom <span>(optional)</span></label>
+          <input id="max-zoom" type="number" min="0" max="22" step="1" placeholder="Native">
+          <small>Blank detects the source’s native zoom. Range: 0–22.</small>
+        </div>
+        <div class="field">
+          <label for="resampling">Resampling</label>
+          <select id="resampling">
+            <option value="auto" selected>Automatic</option>
+            <option value="nearest">Nearest neighbor</option>
+            <option value="bilinear">Bilinear</option>
+            <option value="cubic">Cubic</option>
+            <option value="average">Average</option>
+          </select>
+          <small>Automatic preserves categorical values; otherwise it uses bilinear.</small>
+        </div>
+        <div class="field">
+          <label for="zstd-level">ZSTD level</label>
+          <input id="zstd-level" type="number" value="5" min="1" max="22" step="1" required>
+          <small>1 is faster; 22 compresses more. The default is 5.</small>
+        </div>
+      </div>
+      <p id="upload-status" class="form-status" role="status" aria-live="polite"></p>
+      <div class="form-actions">
+        <button id="upload-cancel" class="secondary" type="button">Cancel</button>
+        <button id="upload-submit" type="submit" disabled>Convert and open</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="sql-dialog" class="workspace-dialog query-dialog" aria-labelledby="sql-title">
+    <div class="dialog-head">
+      <div>
+        <h2 id="sql-title">Query raster pixels</h2>
+        <p>Run one read-only SQLite statement over the active Zarr store.</p>
+      </div>
+      <button id="sql-close" class="icon-button" type="button" aria-label="Close SQL workspace">Close</button>
+    </div>
+    <div class="dialog-body">
+      <p id="sql-store" class="query-store">Current raster store</p>
+      <div class="example-queries" aria-label="Example raster queries">
+        <button class="query-example" type="button" data-query="SELECT x, y, band, value FROM raster LIMIT 100">Preview pixels</button>
+        <button class="query-example" type="button" data-query="SELECT band, COUNT(value) AS valid_samples, MIN(value) AS min_value, MAX(value) AS max_value, AVG(value) AS mean_value FROM raster GROUP BY band ORDER BY band">Band statistics</button>
+        <button class="query-example" type="button" data-query="SELECT band, COUNT(*) - COUNT(value) AS missing_samples FROM raster GROUP BY band ORDER BY band">Missing samples</button>
+        <button class="query-example" type="button" data-query="SELECT x, y, band, value FROM raster WHERE value IS NOT NULL ORDER BY value DESC LIMIT 20">Highest values</button>
+      </div>
+      <form id="sql-form">
+        <div class="field">
+          <label for="sql-input">Read-only SQL</label>
+          <textarea id="sql-input" rows="5" required maxlength="65536" spellcheck="false">SELECT x, y, band, value FROM raster LIMIT 100</textarea>
+          <small>Schema: raster(x INTEGER, y INTEGER, band INTEGER, value REAL). Coordinates are array-relative; band is zero-based. NaN and declared nodata samples load as NULL.</small>
+        </div>
+        <fieldset class="window-options">
+          <legend>Source window</legend>
+          <div class="query-grid">
+            <div class="field">
+              <label for="sql-level">Level</label>
+              <input id="sql-level" type="number" min="0" max="22" step="1" required>
+            </div>
+            <div class="field">
+              <label for="sql-x">Origin X</label>
+              <input id="sql-x" type="number" value="0" step="1" required>
+            </div>
+            <div class="field">
+              <label for="sql-y">Origin Y</label>
+              <input id="sql-y" type="number" value="0" step="1" required>
+            </div>
+            <div class="field">
+              <label for="sql-width">Width <span>(optional)</span></label>
+              <input id="sql-width" type="number" min="1" step="1" placeholder="Full level">
+            </div>
+            <div class="field">
+              <label for="sql-height">Height <span>(optional)</span></label>
+              <input id="sql-height" type="number" min="1" step="1" placeholder="Full level">
+            </div>
+          </div>
+          <small>Leave both dimensions blank for the whole level, or set both for a window. A query can stage at most 1,048,576 band values and returns at most 1,000 rows / 8 MiB.</small>
+        </fieldset>
+        <p id="sql-status" class="form-status" role="status" aria-live="polite"></p>
+        <div class="form-actions">
+          <button id="sql-clear" class="secondary" type="button">Clear results</button>
+          <button id="sql-run" type="submit">Run SQL</button>
+        </div>
+      </form>
+      <div id="sql-results" class="sql-results" tabindex="0" aria-label="SQL query results">
+        <p class="results-empty">Run a query to inspect its results.</p>
+      </div>
+    </div>
+  </dialog>
+
   <script src="/vendor/maplibre-gl.js"></script>
   <script type="module" src="/app.js"></script>
 </body>

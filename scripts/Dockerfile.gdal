@@ -10,4 +10,4 @@ ENV RUSTUP_HOME=/usr/local/rustup \
     CARGO_HOME=/usr/local/cargo \
     PATH=/usr/local/cargo/bin:${PATH}
 WORKDIR /src
-CMD ["cargo", "test", "-p", "zarra-cli", "--test", "gdal", "--all-features", "--", "--ignored", "--nocapture"]
+CMD ["cargo", "test", "-p", "zarra-cli", "--all-features", "--", "--ignored", "--nocapture"]

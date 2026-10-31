@@ -12,6 +12,7 @@ mod query;
 mod range;
 mod serve;
 mod source;
+mod sql;
 mod tile;
 mod viewer;
 
@@ -31,6 +32,8 @@ enum Command {
     Info(info::InfoArgs),
     /// Read an array-relative pixel window as JSON.
     Query(query::QueryArgs),
+    /// Run one read-only SQLite statement over a bounded raster window.
+    Sql(sql::SqlArgs),
     /// Render one XYZ tile as a new RGBA PNG file.
     Tile(tile::TileArgs),
     /// Serve a local store, nested ranges, and the embedded MapLibre viewer.
@@ -43,6 +46,7 @@ fn main() -> ExitCode {
         Command::Convert(arguments) => convert::run(arguments),
         Command::Info(arguments) => info::run(arguments),
         Command::Query(arguments) => query::run(arguments),
+        Command::Sql(arguments) => sql::run(arguments),
         Command::Tile(arguments) => tile::run(arguments),
         Command::Serve(arguments) => serve::run(arguments),
     };

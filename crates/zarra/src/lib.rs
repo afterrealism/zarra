@@ -19,7 +19,7 @@ pub mod query;
 pub mod render;
 pub mod store;
 
-pub use create::{convert, BuildReport};
+pub use create::{convert, convert_with_options, BuildReport, ConvertOptions, Resampling};
 pub use error::{Error, Result};
 pub use level::LevelMeta;
 pub use manifest::{Channels, DType, LevelOffset, Nodata, RasterManifest, TileEncoding};

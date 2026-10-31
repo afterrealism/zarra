@@ -7,7 +7,7 @@ use std::thread;
 use std::time::Duration;
 
 use reqwest::blocking::Client;
-use reqwest::header::{HeaderMap, RANGE};
+use reqwest::header::{HeaderMap, CONTENT_TYPE, RANGE};
 use reqwest::{Method, StatusCode};
 
 #[path = "../src/range.rs"]
@@ -15,7 +15,8 @@ mod range;
 use range::{percent_decode, range_header, resolve, Range};
 
 const STORE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/data/refpy.zarr");
-const TILE_CACHE: &str = "public, max-age=3600, s-maxage=86400";
+const SAMPLE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/data/sample.tif");
+const TILE_CACHE: &str = "no-cache";
 type TestResult = Result<(), Box<dyn std::error::Error>>;
 
 struct Server {
@@ -25,10 +26,19 @@ struct Server {
 
 impl Server {
     fn spawn(store: &Path) -> Result<Self, Box<dyn std::error::Error>> {
-        let mut child = Command::new(env!("CARGO_BIN_EXE_zarra"))
-            .arg("serve")
-            .arg(store)
-            .args(["--port", "0"])
+        Self::spawn_with_upload(store, None)
+    }
+
+    fn spawn_with_upload(
+        store: &Path,
+        upload_root: Option<&Path>,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_zarra"));
+        command.arg("serve").arg(store).args(["--port", "0"]);
+        if let Some(upload_root) = upload_root {
+            command.arg("--upload-root").arg(upload_root);
+        }
+        let mut child = command
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .spawn()?;
@@ -99,6 +109,12 @@ fn request(
         builder = builder.header(RANGE, value);
     }
     let response = builder.send()?;
+    response_data(response)
+}
+
+fn response_data(
+    response: reqwest::blocking::Response,
+) -> Result<ResponseData, Box<dyn std::error::Error>> {
     let status = response.status();
     let headers = response.headers().clone();
     let body = response.bytes()?.to_vec();
@@ -110,6 +126,39 @@ fn request(
         headers,
         body,
     })
+}
+
+fn post(
+    client: &Client,
+    origin: &str,
+    path: &str,
+    body: Vec<u8>,
+    content_type: &'static str,
+    origin_header: Option<&str>,
+) -> Result<ResponseData, Box<dyn std::error::Error>> {
+    let mut builder = client
+        .post(format!("{origin}{path}"))
+        .header(CONTENT_TYPE, content_type)
+        .body(body);
+    if let Some(origin_header) = origin_header {
+        builder = builder.header("Origin", origin_header);
+    }
+    response_data(builder.send()?)
+}
+
+fn post_json(
+    client: &Client,
+    origin: &str,
+    value: &serde_json::Value,
+) -> Result<ResponseData, Box<dyn std::error::Error>> {
+    post(
+        client,
+        origin,
+        "/api/sql",
+        serde_json::to_vec(value)?,
+        "application/json",
+        None,
+    )
 }
 
 fn get(
@@ -545,12 +594,12 @@ fn options_cors_mutations_and_unknown_routes_follow_the_contract() -> TestResult
         );
         let methods = header(&response.headers, "access-control-allow-methods")
             .ok_or("missing allowed methods")?;
-        for method in ["GET", "HEAD"] {
+        for method in ["GET", "HEAD", "POST"] {
             assert!(methods.contains(method), "{methods}");
         }
         assert_eq!(
             header(&response.headers, "access-control-allow-headers"),
-            Some("Range")
+            Some("Range, Content-Type")
         );
         let exposed = header(&response.headers, "access-control-expose-headers")
             .ok_or("missing exposed headers")?;
@@ -582,6 +631,210 @@ fn options_cors_mutations_and_unknown_routes_follow_the_contract() -> TestResult
         .status,
         StatusCode::NOT_FOUND
     );
+    Ok(())
+}
+
+#[test]
+fn sql_endpoint_reads_pixels_enforces_read_only_and_checks_origin() -> TestResult {
+    let server = Server::spawn(Path::new(STORE))?;
+    let client = client()?;
+    let response = post_json(
+        &client,
+        &server.origin,
+        &serde_json::json!({
+            "sql": "SELECT x, y, band, value FROM raster",
+            "level": 0,
+            "x": 2,
+            "y": 2,
+            "width": 1,
+            "height": 1
+        }),
+    )?;
+    assert_eq!(response.status, StatusCode::OK);
+    let result: serde_json::Value = serde_json::from_slice(&response.body)?;
+    assert_eq!(
+        result["columns"],
+        serde_json::json!(["x", "y", "band", "value"])
+    );
+    assert_eq!(result["rows"], serde_json::json!([[2, 2, 0, 2002.0]]));
+    assert_eq!(result["source_values"], 1);
+
+    let aggregate = post_json(
+        &client,
+        &server.origin,
+        &serde_json::json!({"sql": "SELECT COUNT(*) AS samples FROM raster"}),
+    )?;
+    assert_eq!(aggregate.status, StatusCode::OK);
+    let aggregate: serde_json::Value = serde_json::from_slice(&aggregate.body)?;
+    assert_eq!(aggregate["rows"], serde_json::json!([[4096]]));
+
+    for sql in ["DELETE FROM raster", "SELECT 1; SELECT 2"] {
+        let rejected = post_json(&client, &server.origin, &serde_json::json!({"sql": sql}))?;
+        assert_eq!(rejected.status, StatusCode::BAD_REQUEST, "{sql}");
+        let error: serde_json::Value = serde_json::from_slice(&rejected.body)?;
+        assert!(error["error"].as_str().is_some_and(|text| !text.is_empty()));
+    }
+    let cross_site = post(
+        &client,
+        &server.origin,
+        "/api/sql",
+        serde_json::to_vec(&serde_json::json!({"sql": "SELECT 1"}))?,
+        "application/json",
+        Some("https://example.com"),
+    )?;
+    assert_eq!(cross_site.status, StatusCode::FORBIDDEN);
+    let port = server
+        .origin
+        .rsplit(':')
+        .next()
+        .ok_or("missing test port")?;
+    let rebound = client
+        .post(format!("{}/api/sql", server.origin))
+        .header(CONTENT_TYPE, "application/json")
+        .header("Host", format!("rebound.test:{port}"))
+        .header("Origin", format!("http://rebound.test:{port}"))
+        .body(serde_json::to_vec(&serde_json::json!({"sql": "SELECT 1"}))?)
+        .send()?;
+    let rebound = response_data(rebound)?;
+    assert_eq!(rebound.status, StatusCode::FORBIDDEN);
+    let same_origin = post(
+        &client,
+        &server.origin,
+        "/api/sql",
+        serde_json::to_vec(&serde_json::json!({"sql": "SELECT 1 AS one"}))?,
+        "application/json",
+        Some(&server.origin),
+    )?;
+    assert_eq!(same_origin.status, StatusCode::OK);
+
+    for path in ["/api/sql", "/api/uploads"] {
+        let options = request(&client, Method::OPTIONS, &server.origin, path, None)?;
+        assert_eq!(options.status, StatusCode::NO_CONTENT);
+        assert!(header(&options.headers, "access-control-allow-methods")
+            .is_some_and(|methods| methods.contains("POST")));
+        assert_eq!(
+            header(&options.headers, "access-control-allow-headers"),
+            Some("Range, Content-Type")
+        );
+    }
+    let uploads_disabled = post(
+        &client,
+        &server.origin,
+        "/api/uploads?filename=sample.tif&output=sample.zarr",
+        b"not empty".to_vec(),
+        "image/tiff",
+        None,
+    )?;
+    assert_eq!(uploads_disabled.status, StatusCode::FORBIDDEN);
+    Ok(())
+}
+
+#[test]
+fn sql_endpoint_enforces_the_serialized_json_byte_budget() -> TestResult {
+    let server = Server::spawn(Path::new(STORE))?;
+    let client = client()?;
+    let response = post_json(
+        &client,
+        &server.origin,
+        &serde_json::json!({
+            "sql": "SELECT printf('%1000000s', char(1)) AS escaped FROM raster LIMIT 100"
+        }),
+    )?;
+    assert_eq!(response.status, StatusCode::OK);
+    assert!(response.body.len() <= 8 * 1024 * 1024);
+    let result: serde_json::Value = serde_json::from_slice(&response.body)?;
+    assert_eq!(result["truncated"], true);
+    let rows = result["rows"].as_array().ok_or("rows must be an array")?;
+    assert!(!rows.is_empty() && rows.len() < 100);
+    Ok(())
+}
+
+#[test]
+#[ignore = "requires GDAL >= 3.13"]
+fn geotiff_upload_converts_with_options_and_never_overwrites() -> TestResult {
+    let temporary = tempfile::tempdir()?;
+    let upload_root = temporary.path().join("uploads");
+    let server = Server::spawn_with_upload(Path::new(STORE), Some(&upload_root))?;
+    let client = client()?;
+    let sample = fs::read(SAMPLE)?;
+    let tile_before = get(&client, &server.origin, "/raster/0/0/0.png")?;
+    assert_eq!(tile_before.status, StatusCode::OK);
+    assert_eq!(
+        header(&tile_before.headers, "cache-control"),
+        Some("no-cache")
+    );
+    let route = "/api/uploads?filename=sample.tif&output=custom.zarr&maxzoom=0&resampling=nearest&zstd_level=1";
+    let converted = post(
+        &client,
+        &server.origin,
+        route,
+        sample.clone(),
+        "image/tiff",
+        None,
+    )?;
+    assert_eq!(
+        converted.status,
+        StatusCode::CREATED,
+        "{}",
+        String::from_utf8_lossy(&converted.body)
+    );
+    let report: serde_json::Value = serde_json::from_slice(&converted.body)?;
+    assert_eq!(report["output"], "custom.zarr");
+    assert_eq!(report["manifest"]["maxzoom"], 0);
+    let output = upload_root.join("custom.zarr");
+    let root_before = fs::read(output.join("zarr.json"))?;
+    let level: serde_json::Value = serde_json::from_slice(&fs::read(output.join("0/zarr.json"))?)?;
+    assert_eq!(
+        level["codecs"][0]["configuration"]["codecs"][1]["configuration"]["level"],
+        1
+    );
+
+    let active = get(&client, &server.origin, "/api/store")?;
+    let manifest: serde_json::Value = serde_json::from_slice(&active.body)?;
+    assert_eq!(manifest["store_name"], "custom.zarr");
+    assert_eq!(manifest["maxzoom"], 0);
+    assert_eq!(manifest["upload_enabled"], true);
+    let tile_after = get(&client, &server.origin, "/raster/0/0/0.png")?;
+    assert_eq!(tile_after.status, StatusCode::OK);
+    assert_ne!(tile_after.body, tile_before.body);
+    let queried = post_json(
+        &client,
+        &server.origin,
+        &serde_json::json!({"sql": "SELECT COUNT(value) AS valid FROM raster"}),
+    )?;
+    assert_eq!(queried.status, StatusCode::OK);
+    let result: serde_json::Value = serde_json::from_slice(&queried.body)?;
+    assert!(result["rows"][0][0].as_i64().is_some_and(|count| count > 0));
+
+    let repeated = post(&client, &server.origin, route, sample, "image/tiff", None)?;
+    assert_eq!(repeated.status, StatusCode::CONFLICT);
+    assert_eq!(fs::read(output.join("zarr.json"))?, root_before);
+
+    for (name, query) in [
+        ("bad-resampling.zarr", "resampling=lanczos&zstd_level=5"),
+        ("bad-zstd.zarr", "resampling=nearest&zstd_level=23"),
+    ] {
+        let invalid = post(
+            &client,
+            &server.origin,
+            &format!("/api/uploads?filename=sample.tif&output={name}&{query}"),
+            b"not empty".to_vec(),
+            "image/tiff",
+            None,
+        )?;
+        assert_eq!(invalid.status, StatusCode::BAD_REQUEST, "{name}");
+        assert!(!upload_root.join(name).exists());
+    }
+    let traversal = post(
+        &client,
+        &server.origin,
+        "/api/uploads?filename=sample.tif&output=..%2Fescape.zarr",
+        b"not empty".to_vec(),
+        "image/tiff",
+        None,
+    )?;
+    assert_eq!(traversal.status, StatusCode::BAD_REQUEST);
+    assert!(!temporary.path().join("escape.zarr").exists());
     Ok(())
 }
 

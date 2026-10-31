@@ -48,7 +48,7 @@ fn main() -> Result<()> {
 }
 ```
 
-`zarra::convert` accepts a local input and an absent output directory. It requires `gdalinfo`, `gdalwarp`, and `gdal_translate`; `GDAL_BIN_DIR` selects their directory when they are not on `PATH`.
+`zarra::convert` accepts a local input and an absent output directory with default settings. `zarra::convert_with_options` additionally accepts `ConvertOptions` for an optional maximum zoom, GDAL resampling, and ZSTD level 1–22. Both require `gdalinfo`, `gdalwarp`, and `gdal_translate`; `GDAL_BIN_DIR` selects their directory when they are not on `PATH`.
 
 With the `http` feature, `RasterStore::open_url` accepts HTTPS and loopback HTTP. It rejects userinfo, query strings, fragments, unsupported schemes, and non-loopback plain HTTP. Upstream HTTP behavior provides no total-timeout, request/byte-budget, full-body avoidance, or HTTPS-downgrade guarantee.
 

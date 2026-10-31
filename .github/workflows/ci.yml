@@ -12,14 +12,21 @@ jobs:
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec
         with:
           components: rustfmt, clippy
+          targets: wasm32-unknown-unknown
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
         with:
-          node-version: 20
+          node-version: 22
       - run: bash scripts/verify-fixtures.sh
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
       - run: cargo test --workspace --all-features --locked
       - run: cargo check -p zarra --no-default-features
+      - run: sudo apt-get update && sudo apt-get install --no-install-recommends -y clang
+      - run: cargo clippy -p zarra-wasm --target wasm32-unknown-unknown -- -D warnings
+      - run: cargo test -p zarra-wasm --locked
+      - run: npx --yes wasm-pack@0.15.1 build crates/zarra-wasm --target web --release -- --locked
+      - run: npx --yes wasm-pack@0.15.1 test --headless --chrome crates/zarra-wasm --locked
+      - run: node --test crates/zarra-wasm/tests/browser.test.mjs
       - run: RUSTDOCFLAGS='-D warnings' cargo doc --workspace --all-features --no-deps
       - run: npm --prefix example test
       - name: Verify path installation

@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/zarra", "crates/zarra-cli"]
+members = ["crates/zarra", "crates/zarra-cli", "crates/zarra-wasm"]
 
 [workspace.package]
 version = "0.1.0"

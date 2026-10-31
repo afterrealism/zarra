@@ -1,0 +1,31 @@
+[package]
+name = "zarra-wasm"
+description = "Browser WebAssembly bindings for direct signed-object-store Zarr rendering and SQL"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[lints]
+workspace = true
+
+[dependencies]
+zarra = { path = "../zarra", default-features = false, features = ["async", "sql"] }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+async-trait = "0.1"
+futures = "0.3"
+js-sys = "0.3.106"
+png = "=0.18.1"
+serde_json = "1"
+sqlite-wasm-rs = { version = "0.6.2", features = ["wasm-bindgen"] }
+wasm-bindgen = "0.2.129"
+wasm-bindgen-futures = "0.4.79"
+zarrs = { version = "=0.23.15", git = "https://github.com/zarrs/zarrs", rev = "9e55886ecfc4e8f282632d6fb7682869ca69db4b", default-features = false, features = ["async"] }
+
+[target.'cfg(target_arch = "wasm32")'.dev-dependencies]
+wasm-bindgen-test = "0.3.79"

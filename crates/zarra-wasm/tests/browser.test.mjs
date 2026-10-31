@@ -42,8 +42,10 @@ async function readBody(request) {
 
 const requests = [];
 const signing = new Map();
+const signBodies = [];
 let behavior = null;
-let ttlMs = 60_000;
+let ttlSeconds = 60;
+let serverGeneration = "g1";
 let appOrigin;
 
 const storeServer = http.createServer(async (request, response) => {
@@ -57,15 +59,28 @@ const storeServer = http.createServer(async (request, response) => {
     response.writeHead(204).end();
     return;
   }
-  if (url.pathname === "/sign" && request.method === "POST") {
-    const { key, generation } = JSON.parse(await readBody(request));
+  const signMatch = /^\/api\/layers\/([^/]+)\/sign$/.exec(url.pathname);
+  if (signMatch && request.method === "POST") {
+    const body = JSON.parse(await readBody(request));
+    signBodies.push(body);
+    if (!Array.isArray(body.paths) || body.paths.length !== 1 || Object.keys(body).some((key) => key !== "paths")) {
+      response.writeHead(400).end("expected exactly one relative path");
+      return;
+    }
+    const layer = decodeURIComponent(signMatch[1]);
+    const relative = body.paths[0];
+    const key = `${layer}/${relative}`;
+    const generation = serverGeneration;
     const count = (signing.get(`${generation}/${key}`) ?? 0) + 1;
     signing.set(`${generation}/${key}`, count);
-    const expiresAt = Date.now() + ttlMs;
     const signed = `http://localhost:${storeServer.address().port}/object/${encodeURIComponent(key)}?generation=${encodeURIComponent(generation)}&token=secret-${count}`;
     response.setHeader("Content-Type", "application/json");
     response.setHeader("Set-Cookie", "store-cookie=must-not-be-sent");
-    response.writeHead(200).end(JSON.stringify({ url: signed, expiresAt }));
+    response.writeHead(200).end(JSON.stringify({
+      generation: behavior?.wrongGeneration ? "wrong-generation" : generation,
+      expires_at: Math.floor(Date.now() / 1000) + ttlSeconds,
+      objects: [{ path: relative, url: signed }],
+    }));
     return;
   }
   if (url.pathname === "/redirect") {
@@ -293,7 +308,11 @@ test("standalone WASM browser integration", { timeout: 120_000 }, async (t) => {
   await browser.cdp.evaluate("(async () => { window.client = await import('/js/client.js'); window.stores = await import('/js/object-store.js'); window.wasm = await import('/pkg/zarra_wasm.js'); await window.wasm.default('/pkg/zarra_wasm_bg.wasm'); })()");
 
   const evaluate = (expression) => browser.cdp.evaluate(expression);
-  const open = (generation = "g1") => evaluate(`window.client.openRaster({ key: 'refpy.zarr', signEndpoint: '${storeOrigin}/sign', generation: '${generation}' }).then((session) => { window.session = session; return true; })`);
+  const endpoint = (key = "refpy.zarr") => `${storeOrigin}/api/layers/${key}/sign`;
+  const open = (generation = "g1") => {
+    serverGeneration = generation;
+    return evaluate(`window.client.openRaster({ key: 'refpy.zarr', signEndpoint: '${endpoint()}', generation: '${generation}' }).then((session) => { window.session = session; return true; })`);
+  };
   const closeSession = () => evaluate("window.session?.close()");
   const tileHash = async (tile) => {
     const bytes = await evaluate(`window.session.renderTile(${JSON.stringify(tile)}).then((data) => Array.from(new Uint8Array(data)))`);
@@ -301,19 +320,22 @@ test("standalone WASM browser integration", { timeout: 120_000 }, async (t) => {
   };
 
   await t.test("exact full, partial, empty and malformed HTTP responses", async () => {
+    serverGeneration = "http";
     const result = await evaluate(`(async () => {
-      const store = window.stores.createObjectStore({ key: 'refpy.zarr', signEndpoint: '${storeOrigin}/sign', generation: 'http' });
+      const store = window.stores.createObjectStore({ key: 'refpy.zarr', signEndpoint: '${endpoint()}', generation: 'http' });
       const full = await store.get('zarr.json', null);
       const partial = await store.get('zarr.json', 'bytes=0-9');
-      const emptyStore = window.stores.createObjectStore({ key: 'empty.zarr', signEndpoint: '${storeOrigin}/sign', generation: 'http' });
+      const emptyStore = window.stores.createObjectStore({ key: 'empty.zarr', signEndpoint: '${endpoint("empty.zarr")}', generation: 'http' });
       const empty = await emptyStore.get('0/c/0/0/0', 'bytes=0-0');
       const missing = await store.get('absent', null);
       return { full: full.status, partial: partial.status, partialLength: partial.bytes.byteLength, contentRange: partial.contentRange, empty: empty.status, emptyRange: empty.contentRange, missing: missing.status };
     })()`);
     assert.deepEqual(result, { full: 200, partial: 206, partialLength: 10, contentRange: `bytes 0-9/${fixtureFiles.get("refpy.zarr/zarr.json").length}`, empty: 416, emptyRange: "bytes */0", missing: 404 });
-    for (const mode of ["partial200", "wrongRange", "wrongLength", "status500"]) {
+    assert.ok(signBodies.every((body) => Object.keys(body).length === 1 && body.paths.length === 1 && typeof body.paths[0] === "string"));
+    for (const mode of ["partial200", "wrongRange", "wrongLength", "status500", "wrongGeneration"]) {
       behavior = { [mode]: true };
-      const message = await evaluate(`window.stores.createObjectStore({ key: 'refpy.zarr', signEndpoint: '${storeOrigin}/sign', generation: 'bad-${mode}' }).get('${mode === "status500" ? "0/c/0/0/0" : "zarr.json"}', 'bytes=0-9').then(() => null, (error) => error.message)`);
+      serverGeneration = `bad-${mode}`;
+      const message = await evaluate(`window.stores.createObjectStore({ key: 'refpy.zarr', signEndpoint: '${endpoint()}', generation: 'bad-${mode}' }).get('${mode === "status500" ? "0/c/0/0/0" : "zarr.json"}', 'bytes=0-9').then(() => null, (error) => error.message)`);
       assert.ok(message, mode);
       assert.ok(!message.includes("secret-") && !message.includes("/object/"), message);
       behavior = null;
@@ -380,8 +402,9 @@ test("standalone WASM browser integration", { timeout: 120_000 }, async (t) => {
   });
 
   await t.test("SQL uses an injectable monotonic performance clock", async () => {
+    serverGeneration = "clock";
     const message = await evaluate(`(async () => {
-      const store = window.stores.createObjectStore({ key: 'refpy.zarr', signEndpoint: '${storeOrigin}/sign', generation: 'clock' });
+      const store = window.stores.createObjectStore({ key: 'refpy.zarr', signEndpoint: '${endpoint()}', generation: 'clock' });
       const raster = await window.wasm.BrowserRaster.open(store.get);
       const original = performance.now.bind(performance);
       let calls = 0;
@@ -397,17 +420,18 @@ test("standalone WASM browser integration", { timeout: 120_000 }, async (t) => {
   });
 
   await t.test("URLs refresh proactively, retry 401/403 once, and generation clears cache", async () => {
-    ttlMs = 200;
+    ttlSeconds = 1;
+    serverGeneration = "expiry";
     const first = await evaluate(`(async () => {
-      const store = window.stores.createObjectStore({ key: 'refpy.zarr', signEndpoint: '${storeOrigin}/sign', generation: 'expiry' });
+      const store = window.stores.createObjectStore({ key: 'refpy.zarr', signEndpoint: '${endpoint()}', generation: 'expiry' });
       await store.get('zarr.json', null);
-      await new Promise((resolve) => setTimeout(resolve, 180));
+      await new Promise((resolve) => setTimeout(resolve, 900));
       await store.get('zarr.json', null);
       return true;
     })()`);
     assert.equal(first, true);
     assert.equal(signing.get("expiry/refpy.zarr/zarr.json"), 2);
-    ttlMs = 60_000;
+    ttlSeconds = 60;
     for (const status of ["unauthorizedOnce", "forbiddenOnce"]) {
       behavior = { [status]: true };
       await open(status);
@@ -416,13 +440,10 @@ test("standalone WASM browser integration", { timeout: 120_000 }, async (t) => {
       assert.ok((signing.get(`${status}/refpy.zarr/0/c/0/0/0`) ?? 0) >= 2);
       behavior = null;
     }
-    const counts = await evaluate(`(async () => {
-      await window.stores.createObjectStore({ key: 'refpy.zarr', signEndpoint: '${storeOrigin}/sign', generation: 'generation-a' }).get('zarr.json', null);
-      await window.stores.createObjectStore({ key: 'refpy.zarr', signEndpoint: '${storeOrigin}/sign', generation: 'generation-b' }).get('zarr.json', null);
-      await window.stores.createObjectStore({ key: 'refpy.zarr', signEndpoint: '${storeOrigin}/sign', generation: 'generation-a' }).get('zarr.json', null);
-      return true;
-    })()`);
-    assert.equal(counts, true);
+    for (const generation of ["generation-a", "generation-b", "generation-a"]) {
+      serverGeneration = generation;
+      await evaluate(`window.stores.createObjectStore({ key: 'refpy.zarr', signEndpoint: '${endpoint()}', generation: '${generation}' }).get('zarr.json', null)`);
+    }
     assert.equal(signing.get("generation-a/refpy.zarr/zarr.json"), 2);
   });
 
@@ -431,33 +452,37 @@ test("standalone WASM browser integration", { timeout: 120_000 }, async (t) => {
     const result = await evaluate(`(async () => {
       let protocol;
       window.client.registerMapLibreProtocol({ addProtocol: (name, callback) => { if (name !== 'zarra') throw new Error('wrong scheme'); protocol = callback; } }, window.session);
-      const response = await protocol({ z: 0, x: 0, y: 0 }, new AbortController());
+      const response = await protocol({ url: 'zarra:///0/0/0.png' }, new AbortController());
       const controller = new AbortController();
       controller.abort();
-      const aborted = await protocol({ z: 1, x: 0, y: 0 }, controller).then(() => null, (error) => error.name);
-      return { arrayBuffer: response.data instanceof ArrayBuffer, bytes: Array.from(new Uint8Array(response.data)), aborted };
+      const aborted = await protocol({ url: 'zarra:///1/0/0.png' }, controller).then(() => null, (error) => error.name);
+      const malformed = await protocol({ url: 'zarra:///not-a-tile' }, new AbortController()).then(() => null, (error) => error.message);
+      return { arrayBuffer: response.data instanceof ArrayBuffer, bytes: Array.from(new Uint8Array(response.data)), aborted, malformed };
     })()`);
     assert.equal(result.arrayBuffer, true);
     assert.equal(createHash("sha256").update(Buffer.from(result.bytes)).digest("hex"), GOLDEN.native);
     assert.equal(result.aborted, "AbortError");
+    assert.match(result.malformed, /zarra:\/\/\/\{z\}\/\{x\}\/\{y\}\.png/);
     await closeSession();
   });
 
   await t.test("non-loopback HTTP and redirects fail without leaking signed URLs", async () => {
+    serverGeneration = "insecure";
     const insecure = await evaluate(`(async () => {
       const original = window.fetch;
-      window.fetch = (input, init) => String(input).endsWith('/sign') ? Promise.resolve(new Response(JSON.stringify({ url: 'http://example.com/object?token=secret-insecure', expiresAt: Date.now() + 60000 }), { status: 200, headers: { 'Content-Type': 'application/json' } })) : original(input, init);
+      window.fetch = (input, init) => String(input).endsWith('/sign') ? Promise.resolve(new Response(JSON.stringify({ generation: 'insecure', expires_at: Math.floor(Date.now() / 1000) + 60, objects: [{ path: 'zarr.json', url: 'http://example.com/object?token=secret-insecure' }] }), { status: 200, headers: { 'Content-Type': 'application/json' } })) : original(input, init);
       try {
-        return await window.stores.createObjectStore({ key: 'refpy.zarr', signEndpoint: '${storeOrigin}/sign', generation: 'insecure' }).get('zarr.json', null).then(() => null, (error) => error.message);
+        return await window.stores.createObjectStore({ key: 'refpy.zarr', signEndpoint: '${endpoint()}', generation: 'insecure' }).get('zarr.json', null).then(() => null, (error) => error.message);
       } finally { window.fetch = original; }
     })()`);
     assert.ok(insecure);
     assert.ok(!insecure.includes("secret-") && !insecure.includes("/object/"), insecure);
+    serverGeneration = "redirect";
     const redirect = await evaluate(`(async () => {
       const original = window.fetch;
-      window.fetch = (input, init) => String(input).endsWith('/sign') ? Promise.resolve(new Response(JSON.stringify({ url: '${storeOrigin}/redirect?token=secret-redirect', expiresAt: Date.now() + 60000 }), { status: 200, headers: { 'Content-Type': 'application/json' } })) : original(input, init);
+      window.fetch = (input, init) => String(input).endsWith('/sign') ? Promise.resolve(new Response(JSON.stringify({ generation: 'redirect', expires_at: Math.floor(Date.now() / 1000) + 60, objects: [{ path: 'zarr.json', url: '${storeOrigin}/redirect?token=secret-redirect' }] }), { status: 200, headers: { 'Content-Type': 'application/json' } })) : original(input, init);
       try {
-        return await window.stores.createObjectStore({ key: 'refpy.zarr', signEndpoint: '${storeOrigin}/sign', generation: 'redirect' }).get('zarr.json', null).then(() => null, (error) => error.message);
+        return await window.stores.createObjectStore({ key: 'refpy.zarr', signEndpoint: '${endpoint()}', generation: 'redirect' }).get('zarr.json', null).then(() => null, (error) => error.message);
       } finally { window.fetch = original; }
     })()`);
     assert.ok(redirect);

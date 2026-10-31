@@ -22,13 +22,13 @@ function joinKey(base, relative) {
   return base ? `${base}/${relative}` : relative;
 }
 
-async function sign(key, generation, signEndpoint) {
+async function sign(path, generation, signEndpoint) {
   let response;
   try {
     response = await fetch(signEndpoint, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ key, generation }),
+      body: JSON.stringify({ paths: [path] }),
       credentials: "omit",
       redirect: "error",
       cache: "no-store",
@@ -43,22 +43,26 @@ async function sign(key, generation, signEndpoint) {
   } catch {
     throw new Error("object URL signing returned invalid JSON");
   }
-  const url = assertNetworkUrl(body?.url, "signed object URL").href;
-  const expiresAt = body?.expiresAt;
+  if (body?.generation !== generation) throw new Error("object URL signing changed generation");
+  if (!Array.isArray(body?.objects) || body.objects.length !== 1 || body.objects[0]?.path !== path) {
+    throw new Error("object URL signing returned the wrong object");
+  }
+  const url = assertNetworkUrl(body.objects[0]?.url, "signed object URL").href;
   const now = Date.now();
-  if (!Number.isSafeInteger(expiresAt) || expiresAt <= now) {
+  const expiresAt = body?.expires_at * 1000;
+  if (!Number.isSafeInteger(body?.expires_at) || !Number.isSafeInteger(expiresAt) || expiresAt <= now) {
     throw new Error("signed object URL has an invalid expiry");
   }
   const ttl = expiresAt - now;
-  return { url, expiresAt, refreshAt: expiresAt - Math.min(60_000, ttl * 0.2), generation, key };
+  return { url, refreshAt: expiresAt - Math.min(60_000, ttl * 0.2) };
 }
 
-async function cachedUrl(key, generation, signEndpoint, force) {
+async function cachedUrl(key, path, generation, signEndpoint, force) {
   const cacheKey = `${generation}\0${key}`;
   let entry = cache.get(cacheKey);
   if (!force && entry?.url && Date.now() < entry.refreshAt) return entry.url;
   if (!force && entry?.signing) return entry.signing;
-  const signing = sign(key, generation, signEndpoint);
+  const signing = sign(path, generation, signEndpoint);
   entry = { signing };
   cache.set(cacheKey, entry);
   try {
@@ -109,8 +113,8 @@ function responseError(key, status) {
   return new Error(`object request for ${key} returned ${status}`);
 }
 
-async function fetchObject(key, generation, signEndpoint, rangeHeader, force = false) {
-  const url = await cachedUrl(key, generation, signEndpoint, force);
+async function fetchObject(key, path, generation, signEndpoint, rangeHeader, force = false) {
+  const url = await cachedUrl(key, path, generation, signEndpoint, force);
   let response;
   try {
     response = await fetch(url, {
@@ -124,7 +128,7 @@ async function fetchObject(key, generation, signEndpoint, rangeHeader, force = f
     throw new Error(`object request failed for ${key}`);
   }
   if ((response.status === 401 || response.status === 403) && !force) {
-    return fetchObject(key, generation, signEndpoint, rangeHeader, true);
+    return fetchObject(key, path, generation, signEndpoint, rangeHeader, true);
   }
   if (response.status === 404) {
     return { status: 404, bytes: new Uint8Array(), contentRange: null, contentLength: 0 };
@@ -185,7 +189,7 @@ export function createObjectStore({ key, signEndpoint, generation }) {
       } catch (error) {
         return Promise.reject(error);
       }
-      return fetchObject(fullKey, normalizedGeneration, endpoint, rangeHeader);
+      return fetchObject(fullKey, relative, normalizedGeneration, endpoint, rangeHeader);
     },
   };
 }

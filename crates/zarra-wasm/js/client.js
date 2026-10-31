@@ -76,7 +76,13 @@ export async function openRaster(options) {
 }
 
 export function registerMapLibreProtocol(maplibregl, session) {
-  maplibregl.addProtocol("zarra", async ({ z, x, y }, abortController) => {
+  maplibregl.addProtocol("zarra", async ({ url }, abortController) => {
+    const match = /^zarra:\/\/\/(\d+)\/(\d+)\/(\d+)\.png$/.exec(url);
+    if (!match) throw new Error("zarra URL must match zarra:///{z}/{x}/{y}.png");
+    const [z, x, y] = match.slice(1).map(Number);
+    if (![z, x, y].every(Number.isSafeInteger) || z > 22 || x > 0xffffffff || y > 0xffffffff) {
+      throw new Error("zarra URL must match zarra:///{z}/{x}/{y}.png");
+    }
     const signal = abortController?.signal ?? abortController;
     const data = await session.renderTile({ z, x, y }, signal);
     return { data };

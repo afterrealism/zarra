@@ -11,7 +11,9 @@ All notable changes to Zarra are documented here. The format follows [Keep a Cha
 - Local and optional keyed-HTTP stores with exact chunk, window, neighborhood, and ordered/repeated-band reads, sparse/NaN semantics, and checked allocation limits.
 - Native and deep-overzoom XYZ rendering through zoom 22, RG16/RGB8 quantization, first-selected-band nodata alpha, and no-clobber PNG output.
 - The `zarra` binary with `convert`, `info`, `query`, `sql`, `tile`, and local-only `serve` commands.
-- Read-only in-memory SQLite analytics over bounded raster windows, with NaN/declared-nodata-as-NULL staging, a 10-second query interrupt, and bounded JSON results.
+- Read-only in-memory SQLite analytics over bounded raster windows, with NaN/declared-nodata-as-NULL staging, a 10-second query interrupt, and bounded JSON results; the shared core implementation is reused by native and browser callers.
+- Asynchronous Zarr storage and shared decoded-chunk rendering for native/async parity, with `local` (default), `async`, and `sql` core features.
+- Standalone `zarra-wasm` browser artifact with generation-scoped signed per-key reads, strict 200/206/range/CORS behavior, native/overzoom/empty PNG rendering through a MapLibre custom protocol, proactive expiry refresh, and bounded local SQLite SQL. Native CLI/server behavior and byte-identical fixture copies are retained.
 - A sequential loopback server with real tile/manifest routes, nested-object single-range responses, GET/HEAD/POST/OPTIONS handling, path-escape and cross-site-POST defenses, no-overwrite GeoTIFF uploads, and embedded static assets.
 - A MapLibre 4.7.1 raster viewer using the real Rust tile endpoint, declared extent/tile metadata, navigation, fit, pointer telemetry, adjustable GeoTIFF conversion, and SQL result tables.
 - Canonical fixtures with per-crate byte-identical copies, stable/MSRV/GDAL/Node integration checks, package documentation, dual licensing, and read-only CI.

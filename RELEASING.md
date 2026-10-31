@@ -6,7 +6,7 @@ cargo info zarrs@0.23.15
 
 **Run the upstream gate first.** It must succeed before any `cargo package` (other than the file-only `--list` check) or `cargo publish` command. If it is unavailable or fails, stop: retain the local/path release only. A full-SHA git backport is not registry availability.
 
-Only after that command succeeds may an owner publish version 0.1.0. The release order is `zarra` core, then `zarra-cli`; there is no SQL crate. These are owner-run future steps and were not executed as part of the local/path packaging checks.
+Only after that command succeeds may an owner publish version 0.1.0. The release order is `zarra` core, then `zarra-cli`; there is no separate SQL crate. The standalone `zarra-wasm` package is source-built with wasm-pack and is not another registry release step. These are owner-run future steps and were not executed as part of the local/path packaging checks.
 
 ## 1. Require a clean tree and complete verification
 
@@ -18,6 +18,11 @@ cargo fmt --all --check
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo test --workspace --all-features --locked
 cargo check -p zarra --no-default-features
+cargo test -p zarra-wasm --locked
+cargo clippy -p zarra-wasm --target wasm32-unknown-unknown --locked -- -D warnings
+npx --yes wasm-pack@0.15.1 build crates/zarra-wasm --target web --release -- --locked
+npx --yes wasm-pack@0.15.1 test --headless --chrome crates/zarra-wasm -- --locked
+node --test crates/zarra-wasm/tests/browser.test.mjs
 RUSTDOCFLAGS='-D warnings' cargo doc --workspace --all-features --no-deps
 cargo +1.91.0 test --workspace --all-features --locked
 npm --prefix example test
@@ -72,14 +77,14 @@ git push origin v0.1.0
 
 ## 6. Verify docs.rs
 
-Confirm that the docs.rs build for `zarra 0.1.0` succeeds with the `http` feature selected by `[package.metadata.docs.rs]`, and that `RasterStore::open_url` appears in the API documentation. Check the destination over HTTP:
+Confirm that the docs.rs build for `zarra 0.1.0` succeeds with the `async`, `http`, and `sql` features selected by `[package.metadata.docs.rs]`, and that `RasterStore::open_url`, `AsyncRasterStore`, and the shared SQL API appear in the documentation. Check the destination over HTTP:
 
 ```sh
 curl --fail --head https://docs.rs/zarra/0.1.0/zarra/
 curl --fail --silent --show-error https://docs.rs/crate/zarra/0.1.0/features
 ```
 
-The second response should show the crate's feature/build information; inspect it rather than treating a response alone as proof of an `http` build.
+The second response should show the crate's feature/build information; inspect it rather than treating a response alone as proof of the requested feature build.
 
 ## 7. Install and smoke-test from crates.io
 
@@ -88,4 +93,11 @@ cargo install zarra-cli
 zarra --help
 ```
 
-Confirm that `convert`, `info`, `query`, `tile`, and `serve` are listed. This registry installation is distinct from the earlier `cargo install --path crates/zarra-cli` check.
+Confirm that `convert`, `info`, `query`, `sql`, `tile`, and `serve` are listed, then run a real bounded SQL smoke against the committed fixture:
+
+```sh
+zarra sql testdata/refpy.zarr \
+  "SELECT band, COUNT(value) AS valid FROM raster GROUP BY band"
+```
+
+This registry installation is distinct from the earlier `cargo install --path crates/zarra-cli` check.

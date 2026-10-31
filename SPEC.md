@@ -21,6 +21,10 @@ GeoTIFF/COG
   → local or HTTP chunk/window/band queries and bounded read-only SQLite analytics
   → XYZ RGBA8 PNG tiles
   → loopback MapLibre raster viewer with local GeoTIFF conversion uploads
+
+Canonical Zarr v3 prefix
+  → standalone zarra-wasm async signed-key reads
+  → browser PNG custom protocol and the same bounded read-only SQLite analytics
 ```
 
 It is complete when all of these are demonstrated by automated checks:
@@ -31,6 +35,7 @@ It is complete when all of these are demonstrated by automated checks:
 4. `zarra serve` returns tiles, metadata, static viewer assets, and exact nested-object byte ranges with safe error responses.
 5. The viewer displays the real tile endpoint in MapLibre and fits the declared extent; it does not use a hard-coded image.
 6. Formatting, Clippy, workspace tests, Rust 1.91.0 locked tests, GDAL 3.13.1 integration tests, and Node 20+ viewer tests pass.
+7. Actual wasm-pack build/headless tests and direct separate-origin browser tests prove signed per-key ranges, expiry refresh, native/overzoom/band/empty PNG parity, and SQL/nodata/read-only/cap behavior.
 
 ## 2. Scope
 
@@ -42,6 +47,7 @@ It is complete when all of these are demonstrated by automated checks:
 - Zarr v3 arrays in the canonical raster layout below, using maintained `zarrs` decoding rather than a new codec implementation.
 - GeoTIFF/COG conversion through GDAL CLI 3.13 or newer; GDAL 3.13.1 is the compatibility-test version.
 - A loopback server and a small MapLibre 4.7.1 viewer with optional local GeoTIFF uploads and read-only SQL.
+- Async Zarr storage through the `async` core feature, shared SQL through `sql`, and a standalone `zarra-wasm` browser artifact with signed per-key reads, PNG custom-protocol rendering, and the same bounded SQLite analytics.
 - Dual Apache-2.0/MIT packaging, documentation, fixture-based tests, and stable/MSRV/GDAL CI.
 
 ### Explicit non-goals
@@ -50,8 +56,8 @@ It is complete when all of these are demonstrated by automated checks:
 - A new binary format, EOF footer, A5 aggregate, FlatGeobuf body, or Arrow sidecar.
 - Native Rust reprojection, resampling, or GeoTIFF decoding in v1.
 - Arbitrary Zarr versions, chunk-key encodings, endianness, codecs, dimensionality, or storage transformers.
-- Signed S3/SigV4, remote uploads, authentication, PostgreSQL, deletion, cache invalidation, QGIS integration, production hosting, or a public multi-tenant service. Local no-overwrite conversion uploads are included only when `--upload-root` is configured.
-- Rust/WASM bindings or a second JavaScript Zarr decoder.
+- Native CLI minting/management of signed S3/SigV4 credentials, remote uploads, authentication, PostgreSQL, deletion, cache invalidation, QGIS integration, production hosting, or a public multi-tenant service. The browser artifact consumes caller-supplied signed GET URLs but does not own that service lifecycle. Local no-overwrite conversion uploads are included only when `--upload-root` is configured.
+- A second JavaScript Zarr decoder or SQL engine. The standalone Rust/WASM artifact is included; it reuses Zarra's async Zarr, PNG, and SQLite code.
 - deck.gl, terrain colormaps, hillshade, live rescaling, or GPU shaders. The source viewer uses an ordinary MapLibre raster layer; those other capabilities are not implemented there.
 - Lossless scientific values in PNG. PNG bytes are losslessly compressed, but RG16/RGB8 encoding clamps and quantizes source values.
 
@@ -61,17 +67,18 @@ The Cargo workspace uses resolver 2, edition 2021, version 0.1.0, MSRV 1.91.0, a
 
 | Dependency | Version / features | Responsibility |
 |---|---|---|
-| `zarrs` | `0.23.15` full-SHA backport `9e55886ecfc4e8f282632d6fb7682869ca69db4b`; default features off; `filesystem,sharding,crc32c,zstd` | Zarr metadata, keyed storage, sharded reads, codecs |
+| `zarrs` | `0.23.15` full-SHA backport `9e55886ecfc4e8f282632d6fb7682869ca69db4b`; default features off; `sharding,crc32c,zstd`, plus optional `filesystem`/`async` | Zarr metadata, keyed native/async storage, sharded reads, codecs |
 | `zarrs_http` | `=0.3.1`; optional under `zarra/http` | Synchronous keyed HTTP storage |
 | `url` | 2; optional under `zarra/http`, also used by the CLI | Pre-network URL validation and upload parameter decoding |
-| `rusqlite` | `0.41.0`; `bundled,hooks,limits`; CLI only | Read-only in-memory SQLite raster analytics |
+| `rusqlite` | `0.41.0`; `bundled,hooks,limits`; optional under `zarra/sql` | Read-only in-memory SQLite raster analytics shared by native and browser |
+| `sqlite-wasm-rs` | Browser implementation selected by the `zarra-wasm` target dependency graph | Single-threaded WASM SQLite; no SQL.js or second engine |
 | `serde` / `serde_json` | 1 | Root manifest and GDAL JSON |
 | `thiserror` | 2 | Typed library errors |
 | `png` | `=0.18.1` | RGBA8 PNG encoding and golden-test decoding |
 | `tempfile` | 3 | Same-parent build/test temporary directories |
 | `clap` | 4 with `derive`; CLI only | Command-line parsing |
 
-The `zarrs 0.23.15` backport declares Rust 1.91, which sets the workspace MSRV. It fixes the 0.23.14 sparse shard-index overflow found by real GDAL conversion. The root workspace also pins `zarrs_storage` to the same full SHA so registry `zarrs_http 0.3.1` uses a compatible storage trait source. `ndarray`, Blosc, gzip, transpose, and other default `zarrs` features remain disabled. Application crates use `#![forbid(unsafe_code)]`; workspace Clippy denies `unwrap_used`, `expect_used`, `panic`, `unimplemented`, `todo`, and `unreachable` in application code.
+The `zarrs 0.23.15` backport declares Rust 1.91, which sets the workspace MSRV. It fixes the 0.23.14 sparse shard-index overflow found by real GDAL conversion. The root workspace also pins `zarrs_storage` to the same full SHA so registry `zarrs_http 0.3.1` uses a compatible storage trait source. `ndarray`, Blosc, gzip, transpose, and other default `zarrs` features remain disabled. Core features are `local` (default filesystem/GDAL support), `async` (`zarrs/async`), `sql` (`rusqlite`), and native optional `http`. The browser crate selects `default-features=false, features=["async","sql"]`. Application crates use `#![forbid(unsafe_code)]`; workspace Clippy denies `unwrap_used`, `expect_used`, `panic`, `unimplemented`, `todo`, and `unreachable` in application code.
 
 **Release gate:** crates.io has only `zarrs 0.23.14` as of 2026-10-25. The user approved keeping the full-SHA backport for local/path use and deferring crates.io publication until `0.23.15` is released. `cargo package --list` is only a file-inclusion check, not a publish-readiness claim. Actual `cargo package`/`cargo publish` remains blocked until `cargo info zarrs@0.23.15` succeeds and the complete package verification passes.
 
@@ -283,13 +290,40 @@ The implementation uses `ArrayShardedReadableExtCache` for shard indexes. Before
 
 ### 7.1 SQL raster analytics
 
-The CLI's `sql` module reuses `read_window`; it does not decode Zarr independently or create a persistent database. Each request selects a level (maximum by default), array-relative `x`/`y` (zero by default), and either both `width`/`height` or neither for the whole level. At most 1,048,576 band values are staged in fresh in-memory SQLite as:
+The core `sql` module reuses `read_window` and is shared by the CLI, loopback demo server, and browser artifact; it does not decode Zarr independently or create a persistent database. Each request selects a level (maximum by default), array-relative `x`/`y` (zero by default), and either both `width`/`height` or neither for the whole level. At most 1,048,576 band values are staged in fresh in-memory SQLite as:
 
 ```text
 raster(x INTEGER NOT NULL, y INTEGER NOT NULL, band INTEGER NOT NULL, value REAL)
 ```
 
 NaN and declared numeric nodata are inserted as `NULL`, using the renderer's `1e-9` nodata comparison; other finite/infinite samples retain their values. One read-only statement is prepared with rusqlite, multiple statements and non-read-only statements are rejected, SQLite `query_only` is enabled, and a progress handler interrupts execution after 10 seconds. JSON contains column names, rows, a truncation flag, the resolved window, and source-value count. Results are capped at 1,000 rows and an 8 MiB compact JSON body, with exact serialized sizing that includes columns, framing, escaping, and the CLI's trailing newline. Oversized result-column metadata is an error, and an over-budget row is discarded before all its values are accumulated. Non-finite real results use the same string representation as window JSON, and blobs use hexadecimal text.
+
+### 7.2 Standalone async/browser contract
+
+`zarra-wasm` exports `BrowserRaster.open(get)`, `manifestJson()`,
+`renderTile(z,x,y,bands)`, `queryJson(requestJson)`, and `close()`. Its storage
+adapter calls JavaScript `get(key, rangeHeader)` through Zarr's async readable
+storage traits. Full responses require 200; partial responses require 206 and
+exact range/body metadata. A 404 can be sparse data, while transport, metadata,
+decode, 416 (apart from the empty 0-0 size probe), and server failures remain
+errors. Multi-range trait calls become separate single-range GETs; a 200 reply
+to a partial request is never a whole-object fallback.
+
+The JavaScript client caches signed URLs by generation + key, refreshes with
+`min(60 seconds,20% of TTL)` skew, retries 401/403 once, and rejects generation
+changes. Requests omit credentials, reject redirects, and use no-store. The
+bucket must permit exact app origins, GET/Range and expose Accept-Ranges,
+Content-Length, and Content-Range. Signed URL minting, registry, and deletion
+remain Tilify control-plane responsibilities.
+
+Browser rendering calls the shared async renderer and returns valid transparent
+PNG bytes for `Tile::Empty`. MapLibre uses `zarra:///{z}/{x}/{y}.png` and
+`addProtocol`. Browser SQL resolves and reads the same bounded window, then
+calls shared SQLite execution with an injected monotonic `performance.now()`
+clock; all §7.1 source/result/read-only limits apply. The artifact requires no
+SharedArrayBuffer or COOP/COEP and does not add another JavaScript decoder or
+SQL engine. Exact build and verification commands are in
+`docs/tilify-integration.md`.
 
 ## 8. Tile-rendering contract
 
@@ -390,6 +424,11 @@ cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo test --workspace --all-features --locked
 cargo +1.91.0 test --workspace --all-features --locked
 cargo check -p zarra --no-default-features
+cargo test -p zarra-wasm --locked
+cargo clippy -p zarra-wasm --target wasm32-unknown-unknown --locked -- -D warnings
+npx --yes wasm-pack@0.15.1 build crates/zarra-wasm --target web --release -- --locked
+npx --yes wasm-pack@0.15.1 test --headless --chrome crates/zarra-wasm -- --locked
+node --test crates/zarra-wasm/tests/browser.test.mjs
 npm --prefix example test
 install_root="$(mktemp -d)"
 cargo install --path crates/zarra-cli --root "$install_root"
@@ -409,4 +448,4 @@ cargo test -p zarra-cli --all-features -- --ignored --nocapture
 
 Those tests convert `sample.tif`, derive a three-band COG with repeated `-b 1` selections, reopen both outputs, verify 2D/3D layout and metadata, apply custom zoom/resampling/ZSTD options, query known samples, and fetch native and overzoom PNGs. The HTTP upload test converts a real GeoTIFF with custom options, reopens it as the active store, runs SQL against it, and proves invalid options and repeated output names fail without replacing the first output. The ordinary unit/integration suites do not require GDAL to be installed.
 
-The final browser smoke uses `zarra serve testdata/refpy.zarr --port 8090 --upload-root example/data/uploads`: load the printed loopback URL, confirm a nonblank 16×16-data map, use zoom/fit and keyboard navigation, inspect the mobile upload dialog, and run a real SQL query with visible results. Confirm no failed local asset/tile/SQL requests. This visual check complements, rather than replaces, golden pixel, GDAL upload, and HTTP tests.
+The final native-demo browser smoke uses `zarra serve testdata/refpy.zarr --port 8090 --upload-root example/data/uploads`: load the printed loopback URL, confirm a nonblank 16×16-data map, use zoom/fit and keyboard navigation, inspect the mobile upload dialog, and run a real SQL query with visible results. Confirm no failed local asset/tile/SQL requests. This visual check complements, rather than replaces, golden pixel, GDAL upload, HTTP, actual-WASM, and direct signed-storage browser tests. It does not by itself prove the standalone `zarra-wasm` artifact.

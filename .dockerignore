@@ -1,5 +1,6 @@
 .git
 target
+crates/zarra-wasm/pkg
 example/data
 data
 .impeccable

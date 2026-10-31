@@ -1,6 +1,6 @@
 # Zarra
 
-Zarra converts georeferenced GeoTIFF/COG rasters into canonical multiscale Zarr v3 directories, reads their sharded arrays locally or over keyed HTTP, runs read-only SQLite queries over bounded raster windows, renders XYZ RGBA PNG tiles, and serves an embedded MapLibre viewer with local GeoTIFF uploads. The workspace contains the `zarra` library and the `zarra-cli` package, which installs a binary named `zarra`.
+Zarra converts georeferenced GeoTIFF/COG rasters into canonical multiscale Zarr v3 directories, reads their sharded arrays locally or over keyed HTTP, runs read-only SQLite queries over bounded raster windows, renders XYZ RGBA PNG tiles, and serves an embedded MapLibre viewer with local GeoTIFF uploads. The standalone `zarra-wasm` artifact reuses the async store, renderer, and SQL core for direct signed-object-store browser sessions. The workspace contains the `zarra` library, the `zarra-cli` package (which installs a binary named `zarra`), and `zarra-wasm`.
 
 Zarra uses the upstream Zarr format; it is not a new single-file raster format. The supported profile is defined in [SPEC.md](SPEC.md).
 
@@ -120,6 +120,30 @@ FROM raster GROUP BY band ORDER BY band;
 
 The highest store level is the default. Omit both `--width` and `--height` for the whole level, or set both for a window; the viewer offers the same controls. Each query stages at most 1,048,576 band values in a fresh in-memory SQLite database. It permits one read-only statement, interrupts execution after 10 seconds, and returns at most 1,000 rows in an 8 MiB compact JSON body (including metadata and escaping). This is on-demand window analytics, not a persistent analytics sidecar or a second raster decoder.
 
+## Standalone browser WASM
+
+`crates/zarra-wasm` is the actual Rust/WASM artifact for Tilify's direct data
+plane. It uses `default-features=false, features=["async","sql"]`, fetches each
+signed Zarr key directly from object storage, renders PNG through the shared
+renderer, and executes the same bounded read-only SQLite implementation. Build
+it with Rust 1.91 and wasm-pack 0.15.1:
+
+```sh
+npx --yes wasm-pack@0.15.1 build crates/zarra-wasm --target web --release -- --locked
+```
+
+Tilify's C++ app only processes uploads and signs registry-scoped GET URLs; it
+does not render uploaded tiles or execute uploaded-data SQL. Browser signing
+refreshes at `min(60s,20% of TTL)` before expiry, retries one 401/403, and
+rejects generation changes. The bucket must allow the exact app origins,
+GET + Range, and expose `Accept-Ranges`, `Content-Length`, and `Content-Range`.
+Partial reads require exact 206 responses; there is no whole-object fallback.
+
+The native CLI and `zarra serve` demo remain supported and are separate from
+this browser artifact. See the [Tilify integration guide](docs/tilify-integration.md)
+for exact WASM/test commands, support limits, CORS/error semantics, the QGIS
+1 GiB local-cache/GDAL 3.13+ contract, deletion lifecycle, and verification.
+
 ## Tile encoding and output safety
 
 An empty tile band selection uses band 0 for one-band data or the first up-to-three bands for multiband data. Explicit selections contain one to three indices and may repeat.
@@ -136,14 +160,14 @@ Native and deep-overzoom tiles always read the appropriate maxzoom ancestor. PNG
 
 | Area | Included in 0.1.0 | Not included |
 |---|---|---|
-| Storage | Local directories; optional keyed HTTP reads; no-overwrite local conversion uploads | Signed S3/SigV4, remote uploads, authentication, PostgreSQL, deletion, cache invalidation, or remote publication |
+| Storage | Local directories; optional keyed HTTP reads; no-overwrite local conversion uploads; async browser reads through caller-supplied signed URLs | Native signing/minting, remote uploads/publication, authentication, PostgreSQL, deletion, or cache invalidation as a multi-tenant service |
 | Creation | GeoTIFF/COG through GDAL 3.13+ CLI; optional zoom, resampling, and ZSTD controls | Native Rust GeoTIFF decoding, reprojection, or resampling |
 | Arrays | Zarr v3; 2D/3D; default `/` keys; little-endian bytes; optional inner ZSTD; CRC32C sharding | Arbitrary Zarr versions, layouts, endianness, codecs, dimensionality, or storage transformers |
 | Values | `uint8`, `int8`, `uint16`, `int16`, `uint32`, `int32`, `float32`, `float64`; shared dtype/nodata | 64-bit integers, complex values, or mixed band dtypes/nodata |
 | Query | Level metadata, chunk enumeration/reads, windows, neighborhoods, ordered/repeated bands, bounded read-only SQLite analytics | Persistent analytics sidecar, Arrow schema, or a separate `zarra-sql` crate |
 | Rendering | XYZ zoom 0–22, native/overzoom, RG16/RGB8, first-band nodata alpha, 200 PNG/204 empty | Terrain color, hillshade, live rescaling, GPU shaders, or lossless scientific PNG values |
-| Viewer | MapLibre 4.7.1 raster source at opacity 0.92, extent fit, navigation, metadata and XYZ telemetry, GeoTIFF upload/conversion controls, and SQL results | deck.gl, basemaps, accounts, cloud analytics, or a second JavaScript decoder |
-| Package | Core, CLI, embedded viewer, npm launcher/tests, docs and CI | WASM bindings, QGIS integration, production hosting, a Pages site, an xtask crate, or a multi-tenant service |
+| Viewer | Native loopback MapLibre 4.7.1 viewer plus standalone browser `zarra:///{z}/{x}/{y}.png` protocol, extent fit, PNG rendering, and SQL results | deck.gl, basemaps, accounts, cloud analytics, or a second JavaScript decoder |
+| Package | Core, CLI, embedded viewer, standalone `zarra-wasm`, npm launcher/tests, docs and CI | Native QGIS integration, production hosting, a Pages site, an xtask crate, or a multi-tenant service |
 
 The fixture-based tests are not large-raster benchmarks, and no performance, remote byte-budget, LRU-cache, or distributed atomicity claim is made. Zarra does not impose a total GDAL CPU, memory, disk, or time bound; its checked chunk/query allocation caps are not total process-memory limits.
 
@@ -157,6 +181,11 @@ cargo fmt --all --check
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo test --workspace --all-features --locked
 cargo check -p zarra --no-default-features
+cargo test -p zarra-wasm --locked
+cargo clippy -p zarra-wasm --target wasm32-unknown-unknown --locked -- -D warnings
+npx --yes wasm-pack@0.15.1 build crates/zarra-wasm --target web --release -- --locked
+npx --yes wasm-pack@0.15.1 test --headless --chrome crates/zarra-wasm -- --locked
+node --test crates/zarra-wasm/tests/browser.test.mjs
 RUSTDOCFLAGS='-D warnings' cargo doc --workspace --all-features --no-deps
 cargo +1.91.0 test --workspace --all-features --locked
 npm --prefix example test
@@ -169,7 +198,7 @@ cargo package -p zarra-cli --list --allow-dirty
 bash scripts/test-gdal.sh
 ```
 
-Node.js 20+ is required for the example tests, which build the real CLI and exercise the same `geo.js` module used by the browser. The GDAL script requires Docker and runs the ignored 2D/3D conversion, custom conversion options, HTTP upload/active-store conversion, reopen/query, rendering, and no-clobber integration tests against GDAL 3.13.1 and Rust 1.91.0.
+Node.js 20+ is required for the example and direct browser tests. The example tests build the real CLI and exercise the same `geo.js` module used by the native viewer; the `zarra-wasm` tests separately build and exercise the actual standalone artifact with signed range/error/expiry, PNG, and SQL assertions. The GDAL script requires Docker and runs the ignored 2D/3D conversion, custom conversion options, HTTP upload/active-store conversion, reopen/query, rendering, and no-clobber integration tests against GDAL 3.13.1 and Rust 1.91.0.
 
 `cargo package --list` checks file inclusion only. It is not publish readiness: actual packaging and publication remain gated by upstream `zarrs 0.23.15` availability. See [RELEASING.md](RELEASING.md).
 

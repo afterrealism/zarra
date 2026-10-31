@@ -4,8 +4,9 @@
 
 - GeoTIFF/COG conversion through GDAL 3.13+ command-line tools;
 - strict root-manifest and level-metadata validation;
-- local and optional keyed-HTTP stores;
+- local and optional keyed-HTTP stores, plus async storage through the `async` feature;
 - chunk, window, neighborhood, and ordered/repeated-band queries;
+- optional bounded read-only SQLite analytics through the `sql` feature;
 - native and deep-overzoom XYZ rendering to RG16/RGB8 RGBA PNG tiles.
 
 The `zarra-cli` package supplies the `zarra` binary and embedded viewer. See the [workspace README](https://github.com/afterrealism/zarra#readme) for the complete CLI/support contract and [SPEC.md](https://github.com/afterrealism/zarra/blob/main/SPEC.md) for the authoritative profile.
@@ -21,7 +22,10 @@ From another crate in this workspace, use:
 zarra = { path = "../zarra" }
 ```
 
-The core's default feature set is empty. Enable `http` for HTTPS and loopback-HTTP stores:
+The core's default feature is `local`, which retains native filesystem/GDAL
+behavior. Enable `http` for HTTPS and loopback-HTTP stores, `async` for async
+Zarr storage, and `sql` for shared read-only SQLite analytics. The standalone
+browser crate uses `default-features=false, features=["async","sql"]`:
 
 ```toml
 zarra = { path = "../zarra", features = ["http"] }
@@ -54,8 +58,10 @@ With the `http` feature, `RasterStore::open_url` accepts HTTPS and loopback HTTP
 
 Window values are row-major and band-interleaved `f64`; chunk values are band-planar. Sparse and outside-array window cells are NaN, while transport and decode failures remain errors. PNG rendering clamps and quantizes for display, and only the first selected band controls declared-nodata alpha.
 
+The separate `zarra-wasm` crate reuses this core for direct signed-object-store browser rendering and SQL. It is not the native `zarra serve` demo or a second JavaScript decoder. See the workspace [Tilify integration guide](https://github.com/afterrealism/zarra/blob/main/docs/tilify-integration.md) for the actual build, signed URL/CORS lifecycle, and hard limits.
+
 ## Verification and license
 
-Run `cargo test -p zarra --all-features --locked` and `cargo check -p zarra --no-default-features` from the workspace. The intended API documentation destination after publication is [docs.rs/zarra](https://docs.rs/zarra), built with the `http` feature.
+Run `cargo test -p zarra --all-features --locked` and `cargo check -p zarra --no-default-features` from the workspace. The intended API documentation destination after publication is [docs.rs/zarra](https://docs.rs/zarra), built with the `async`, `http`, and `sql` features.
 
 Licensed under Apache-2.0 OR MIT. See the workspace `LICENSE-APACHE`, `LICENSE-MIT`, and `ATTRIBUTION.md` files.

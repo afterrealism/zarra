@@ -30,7 +30,7 @@ Conversion requires GDAL 3.13+ (`GDAL_BIN_DIR` optionally selects its executable
 
 `sql` stages the selected level/window in fresh in-memory SQLite as `raster(x, y, band, value)`, with NaN and declared nodata represented as `NULL`. It accepts one read-only statement, stages at most 1,048,576 band values, interrupts execution after 10 seconds, and emits bounded compact JSON (up to 1,000 rows / 8 MiB, including metadata and escaping).
 
-`serve` owns the loopback nested-object range server, read-only SQL endpoint, optional no-overwrite GeoTIFF upload endpoint, and embedded MapLibre 4.7.1 viewer. `--upload-root` enables conversion uploads and is disabled by default. The viewer can adjust conversion settings, open the converted active store, and query its actual pixels. It serves real Rust-rendered tiles and all vendored assets, including the MapLibre/Mapbox/glfx/d3 license notices. The `example/` directory only launches and tests this same binary.
+`serve` owns the loopback nested-object range server, read-only SQL endpoint, optional no-overwrite GeoTIFF upload endpoint, and embedded MapLibre 4.7.1 viewer. `--upload-root` enables conversion uploads and is disabled by default. The viewer can adjust conversion settings, open the converted active store, and query its actual pixels. It serves real Rust-rendered tiles and all vendored assets, including the MapLibre/Mapbox/glfx/d3 license notices. The `example/` directory only launches and tests this same binary. This native demo is separate from the standalone `zarra-wasm` direct-signed-storage browser artifact.
 
 See the [workspace README](https://github.com/afterrealism/zarra#readme) for query layout, band/alpha semantics, the exact support matrix, HTTP limitations, and all verification commands.
 

@@ -12,7 +12,7 @@ categories = ["science::geo", "parser-implementations"]
 include = ["src/**", "tests/**", "Cargo.toml", "README.md"]
 
 [package.metadata.docs.rs]
-features = ["http"]
+features = ["async", "http", "sql"]
 
 [lints]
 workspace = true
@@ -21,13 +21,20 @@ workspace = true
 png = "=0.18.1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-tempfile = "3"
+tempfile = { version = "3", optional = true }
 thiserror = "2"
 url = { version = "2", optional = true }
+rusqlite = { version = "0.41.0", features = ["bundled", "hooks", "limits"], optional = true }
 # The 0.23.15 backport fixes sparse shard-index overflow without changing the 1.91 MSRV.
-zarrs = { version = "=0.23.15", git = "https://github.com/zarrs/zarrs", rev = "9e55886ecfc4e8f282632d6fb7682869ca69db4b", default-features = false, features = ["filesystem", "sharding", "crc32c", "zstd"] }
+zarrs = { version = "=0.23.15", git = "https://github.com/zarrs/zarrs", rev = "9e55886ecfc4e8f282632d6fb7682869ca69db4b", default-features = false, features = ["sharding", "crc32c", "zstd"] }
 zarrs_http = { version = "=0.3.1", optional = true }
 
 [features]
-default = []
+default = ["local"]
+local = ["dep:tempfile", "zarrs/filesystem"]
+async = ["zarrs/async"]
+sql = ["dep:rusqlite"]
 http = ["dep:zarrs_http", "dep:url"]
+
+[dev-dependencies]
+futures = "0.3"

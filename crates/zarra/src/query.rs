@@ -1,8 +1,11 @@
 //! Exact chunk, window, neighborhood, and band reads from sharded arrays.
 
+#[cfg(any(feature = "local", feature = "http"))]
 use zarrs::array::{ArrayShardedReadableExt, CodecOptions};
 
-use crate::{DType, Error, RasterStore, Result};
+#[cfg(any(feature = "local", feature = "http"))]
+use crate::{DType, RasterStore};
+use crate::{Error, LevelMeta, Result};
 
 const MAX_QUERY_VALUES: u64 = 16_777_216;
 
@@ -30,6 +33,28 @@ pub struct Chunk {
 }
 
 impl Chunk {
+    pub(crate) fn from_decoded(meta: LevelMeta, values: Vec<f64>) -> Result<Self> {
+        let edge = usize::try_from(meta.inner)
+            .map_err(|_| Error::InvalidInput("chunk edge does not fit usize".into()))?;
+        let expected = meta
+            .bands
+            .checked_mul(edge)
+            .and_then(|count| count.checked_mul(edge))
+            .ok_or_else(|| Error::InvalidInput("decoded chunk length overflows usize".into()))?;
+        if values.len() != expected {
+            return Err(Error::Format(format!(
+                "decoded chunk has {} values, expected {expected}",
+                values.len()
+            )));
+        }
+        Ok(Self {
+            bands: meta.bands,
+            width: meta.inner,
+            height: meta.inner,
+            values,
+        })
+    }
+
     /// Returns one sample, or `None` when any coordinate is outside the chunk.
     pub fn value(&self, band: usize, row: u32, col: u32) -> Option<f64> {
         if band >= self.bands || row >= self.height || col >= self.width {
@@ -61,6 +86,175 @@ pub struct Window {
     pub values: Vec<f64>,
 }
 
+pub(crate) struct WindowPlan {
+    width: u32,
+    height: u32,
+    bands: Vec<usize>,
+    values: Vec<f64>,
+    x0: i128,
+    y0: i128,
+    valid_x0: i128,
+    valid_y0: i128,
+    valid_x1: i128,
+    valid_y1: i128,
+    inner: i128,
+    output_width: usize,
+    first_col: u64,
+    next_col: u64,
+    next_row: u64,
+    last_col: u64,
+    last_row: u64,
+    done: bool,
+}
+
+impl WindowPlan {
+    pub(crate) fn new(
+        meta: LevelMeta,
+        x0: i64,
+        y0: i64,
+        width: u32,
+        height: u32,
+        bands: &[usize],
+    ) -> Result<Self> {
+        if bands.is_empty() {
+            return Err(Error::InvalidInput(
+                "band selection must not be empty".into(),
+            ));
+        }
+        let output_len = query_values_len(width, height, bands.len())?;
+        if let Some(band) = bands.iter().find(|band| **band >= meta.bands) {
+            return Err(Error::InvalidInput(format!(
+                "band {band} is outside 0..{}",
+                meta.bands
+            )));
+        }
+        let mut values = Vec::new();
+        values.try_reserve_exact(output_len).map_err(|error| {
+            Error::InvalidInput(format!("cannot allocate query window: {error}"))
+        })?;
+        values.resize(output_len, f64::NAN);
+
+        let x0_signed = i128::from(x0);
+        let y0_signed = i128::from(y0);
+        let x1 = x0_signed + i128::from(width);
+        let y1 = y0_signed + i128::from(height);
+        let valid_x0 = x0_signed.max(0);
+        let valid_y0 = y0_signed.max(0);
+        let valid_x1 = x1.min(i128::from(meta.width));
+        let valid_y1 = y1.min(i128::from(meta.height));
+        let inner = i128::from(meta.inner);
+        let empty = valid_x0 >= valid_x1 || valid_y0 >= valid_y1;
+        let (next_col, next_row, last_col, last_row) = if empty {
+            (0, 0, 0, 0)
+        } else {
+            (
+                u64::try_from(valid_x0 / inner)
+                    .map_err(|_| Error::InvalidInput("chunk column exceeds u64".into()))?,
+                u64::try_from(valid_y0 / inner)
+                    .map_err(|_| Error::InvalidInput("chunk row exceeds u64".into()))?,
+                u64::try_from((valid_x1 - 1) / inner)
+                    .map_err(|_| Error::InvalidInput("chunk column exceeds u64".into()))?,
+                u64::try_from((valid_y1 - 1) / inner)
+                    .map_err(|_| Error::InvalidInput("chunk row exceeds u64".into()))?,
+            )
+        };
+        let output_width = usize::try_from(width)
+            .map_err(|_| Error::InvalidInput("window width does not fit usize".into()))?;
+        Ok(Self {
+            width,
+            height,
+            bands: bands.to_vec(),
+            values,
+            x0: x0_signed,
+            y0: y0_signed,
+            valid_x0,
+            valid_y0,
+            valid_x1,
+            valid_y1,
+            inner,
+            output_width,
+            first_col: next_col,
+            next_col,
+            next_row,
+            last_col,
+            last_row,
+            done: empty,
+        })
+    }
+
+    pub(crate) fn next_chunk(&mut self) -> Option<ChunkRef> {
+        if self.done {
+            return None;
+        }
+        let reference = ChunkRef {
+            col: self.next_col,
+            row: self.next_row,
+        };
+        if self.next_col < self.last_col {
+            self.next_col += 1;
+        } else if self.next_row < self.last_row {
+            self.next_col = self.first_col;
+            self.next_row += 1;
+        } else {
+            self.done = true;
+        }
+        Some(reference)
+    }
+
+    pub(crate) fn accumulate(&mut self, reference: ChunkRef, chunk: &Chunk) -> Result<()> {
+        let chunk_x0 = i128::from(reference.col) * self.inner;
+        let chunk_y0 = i128::from(reference.row) * self.inner;
+        let overlap_x0 = self.valid_x0.max(chunk_x0);
+        let overlap_y0 = self.valid_y0.max(chunk_y0);
+        let overlap_x1 = self.valid_x1.min(chunk_x0 + self.inner);
+        let overlap_y1 = self.valid_y1.min(chunk_y0 + self.inner);
+        for y in overlap_y0..overlap_y1 {
+            let output_row = usize::try_from(y - self.y0)
+                .map_err(|_| Error::InvalidInput("window row does not fit usize".into()))?;
+            let chunk_y = u32::try_from(y - chunk_y0)
+                .map_err(|_| Error::InvalidInput("chunk row does not fit u32".into()))?;
+            for x in overlap_x0..overlap_x1 {
+                let output_col = usize::try_from(x - self.x0)
+                    .map_err(|_| Error::InvalidInput("window column does not fit usize".into()))?;
+                let chunk_x = u32::try_from(x - chunk_x0)
+                    .map_err(|_| Error::InvalidInput("chunk column does not fit u32".into()))?;
+                let output_pixel = output_row
+                    .checked_mul(self.output_width)
+                    .and_then(|index| index.checked_add(output_col))
+                    .ok_or_else(|| {
+                        Error::InvalidInput("window output index overflows usize".into())
+                    })?;
+                for (channel, source_band) in self.bands.iter().copied().enumerate() {
+                    let value = chunk.value(source_band, chunk_y, chunk_x).ok_or_else(|| {
+                        Error::Format("decoded chunk coordinate is inconsistent".into())
+                    })?;
+                    let output_index = output_pixel
+                        .checked_mul(self.bands.len())
+                        .and_then(|index| index.checked_add(channel))
+                        .ok_or_else(|| {
+                            Error::InvalidInput("window band index overflows usize".into())
+                        })?;
+                    let output = self.values.get_mut(output_index).ok_or_else(|| {
+                        Error::Format("window output index is inconsistent".into())
+                    })?;
+                    *output = value;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn finish(self) -> Window {
+        Window {
+            width: self.width,
+            height: self.height,
+            bands: self.bands,
+            values: self.values,
+        }
+    }
+}
+
+#[cfg(any(feature = "local", feature = "http"))]
 impl RasterStore {
     /// Enumerates every inner-chunk coordinate in row-major order.
     pub fn enumerate_chunks(&mut self, level: u8) -> Result<Vec<ChunkRef>> {
@@ -134,25 +328,7 @@ impl RasterStore {
             DType::Float32 => decode!(f32),
             DType::Float64 => decode!(f64),
         };
-        let edge = usize::try_from(meta.inner)
-            .map_err(|_| Error::InvalidInput("chunk edge does not fit usize".into()))?;
-        let expected = meta
-            .bands
-            .checked_mul(edge)
-            .and_then(|count| count.checked_mul(edge))
-            .ok_or_else(|| Error::InvalidInput("decoded chunk length overflows usize".into()))?;
-        if values.len() != expected {
-            return Err(Error::Format(format!(
-                "decoded chunk has {} values, expected {expected}",
-                values.len()
-            )));
-        }
-        Ok(Some(Chunk {
-            bands: meta.bands,
-            width: meta.inner,
-            height: meta.inner,
-            values,
-        }))
+        Chunk::from_decoded(meta, values).map(Some)
     }
 
     /// Reads all bands as row-major, band-interleaved samples with NaN padding.
@@ -178,108 +354,14 @@ impl RasterStore {
         height: u32,
         bands: &[usize],
     ) -> Result<Window> {
-        if bands.is_empty() {
-            return Err(Error::InvalidInput(
-                "band selection must not be empty".into(),
-            ));
-        }
-        let output_len = query_values_len(width, height, bands.len())?;
         let meta = self.level_meta(level)?;
-        if let Some(band) = bands.iter().find(|band| **band >= meta.bands) {
-            return Err(Error::InvalidInput(format!(
-                "band {band} is outside 0..{}",
-                meta.bands
-            )));
-        }
-        let mut values = Vec::new();
-        values.try_reserve_exact(output_len).map_err(|error| {
-            Error::InvalidInput(format!("cannot allocate query window: {error}"))
-        })?;
-        values.resize(output_len, f64::NAN);
-
-        let x0_signed = i128::from(x0);
-        let y0_signed = i128::from(y0);
-        let x1 = x0_signed + i128::from(width);
-        let y1 = y0_signed + i128::from(height);
-        let valid_x0 = x0_signed.max(0);
-        let valid_y0 = y0_signed.max(0);
-        let valid_x1 = x1.min(i128::from(meta.width));
-        let valid_y1 = y1.min(i128::from(meta.height));
-        if valid_x0 >= valid_x1 || valid_y0 >= valid_y1 {
-            return Ok(Window {
-                width,
-                height,
-                bands: bands.to_vec(),
-                values,
-            });
-        }
-
-        let inner = i128::from(meta.inner);
-        let first_col = valid_x0 / inner;
-        let first_row = valid_y0 / inner;
-        let last_col = (valid_x1 - 1) / inner;
-        let last_row = (valid_y1 - 1) / inner;
-        let output_width = usize::try_from(width)
-            .map_err(|_| Error::InvalidInput("window width does not fit usize".into()))?;
-        for chunk_row in first_row..=last_row {
-            for chunk_col in first_col..=last_col {
-                let col = u64::try_from(chunk_col)
-                    .map_err(|_| Error::InvalidInput("chunk column exceeds u64".into()))?;
-                let row = u64::try_from(chunk_row)
-                    .map_err(|_| Error::InvalidInput("chunk row exceeds u64".into()))?;
-                let Some(chunk) = self.read_chunk(level, col, row)? else {
-                    continue;
-                };
-                let chunk_x0 = chunk_col * inner;
-                let chunk_y0 = chunk_row * inner;
-                let overlap_x0 = valid_x0.max(chunk_x0);
-                let overlap_y0 = valid_y0.max(chunk_y0);
-                let overlap_x1 = valid_x1.min(chunk_x0 + inner);
-                let overlap_y1 = valid_y1.min(chunk_y0 + inner);
-                for y in overlap_y0..overlap_y1 {
-                    let output_row = usize::try_from(y - y0_signed)
-                        .map_err(|_| Error::InvalidInput("window row does not fit usize".into()))?;
-                    let chunk_y = u32::try_from(y - chunk_y0)
-                        .map_err(|_| Error::InvalidInput("chunk row does not fit u32".into()))?;
-                    for x in overlap_x0..overlap_x1 {
-                        let output_col = usize::try_from(x - x0_signed).map_err(|_| {
-                            Error::InvalidInput("window column does not fit usize".into())
-                        })?;
-                        let chunk_x = u32::try_from(x - chunk_x0).map_err(|_| {
-                            Error::InvalidInput("chunk column does not fit u32".into())
-                        })?;
-                        let output_pixel = output_row
-                            .checked_mul(output_width)
-                            .and_then(|index| index.checked_add(output_col))
-                            .ok_or_else(|| {
-                                Error::InvalidInput("window output index overflows usize".into())
-                            })?;
-                        for (channel, source_band) in bands.iter().copied().enumerate() {
-                            let value =
-                                chunk.value(source_band, chunk_y, chunk_x).ok_or_else(|| {
-                                    Error::Format("decoded chunk coordinate is inconsistent".into())
-                                })?;
-                            let output_index = output_pixel
-                                .checked_mul(bands.len())
-                                .and_then(|index| index.checked_add(channel))
-                                .ok_or_else(|| {
-                                    Error::InvalidInput("window band index overflows usize".into())
-                                })?;
-                            let output = values.get_mut(output_index).ok_or_else(|| {
-                                Error::Format("window output index is inconsistent".into())
-                            })?;
-                            *output = value;
-                        }
-                    }
-                }
+        let mut plan = WindowPlan::new(meta, x0, y0, width, height, bands)?;
+        while let Some(reference) = plan.next_chunk() {
+            if let Some(chunk) = self.read_chunk(level, reference.col, reference.row)? {
+                plan.accumulate(reference, &chunk)?;
             }
         }
-        Ok(Window {
-            width,
-            height,
-            bands: bands.to_vec(),
-            values,
-        })
+        Ok(plan.finish())
     }
 
     /// Reads a checked `(2r+1)` square centered on one pixel with NaN padding.
@@ -328,7 +410,7 @@ pub fn parse_band_list(text: &str) -> Result<Vec<usize>> {
         .collect()
 }
 
-fn grid_axis(size: u64, inner: u32) -> u64 {
+pub(crate) fn grid_axis(size: u64, inner: u32) -> u64 {
     size.div_ceil(u64::from(inner))
 }
 

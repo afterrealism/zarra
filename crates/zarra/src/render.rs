@@ -1,6 +1,10 @@
 //! XYZ raster tile rendering with RG16/RGB8 packing and PNG encoding.
 
-use crate::{Chunk, Error, Nodata, RasterManifest, RasterStore, Result};
+#[cfg(feature = "async")]
+use crate::AsyncRasterStore;
+#[cfg(any(feature = "local", feature = "http"))]
+use crate::RasterStore;
+use crate::{Chunk, Error, Nodata, RasterManifest, Result};
 
 /// One validated XYZ tile coordinate.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -104,36 +108,82 @@ fn ancestor(tile: TileCoord, maxzoom: u8) -> Ancestor {
     }
 }
 
-/// Renders one XYZ tile from a canonical raster store.
-///
-/// An empty band slice selects the manifest default. One selected band uses
-/// RG16; two or three selected bands use independently normalized RGB8.
-pub fn render_tile(store: &mut RasterStore, tile: TileCoord, bands: &[usize]) -> Result<Tile> {
+struct TileRead {
+    selection: RenderSelection,
+    ancestor: Ancestor,
+    col: u64,
+    row: u64,
+}
+
+fn prepare_tile(
+    manifest: &RasterManifest,
+    tile: TileCoord,
+    bands: &[usize],
+) -> Result<Option<TileRead>> {
     tile.validate()?;
-    let selection = RenderSelection::new(store.manifest(), bands)?;
-    let ancestor = ancestor(tile, store.manifest().maxzoom);
-    let offset = store
-        .manifest()
+    let selection = RenderSelection::new(manifest, bands)?;
+    let ancestor = ancestor(tile, manifest.maxzoom);
+    let offset = manifest
         .level(ancestor.level)
         .ok_or_else(|| Error::Format(format!("manifest has no level {}", ancestor.level)))?;
     let Some(col) = ancestor.ox.checked_sub(offset.xoff) else {
-        return Ok(Tile::Empty);
+        return Ok(None);
     };
     let Some(row) = ancestor.oy.checked_sub(offset.yoff) else {
-        return Ok(Tile::Empty);
+        return Ok(None);
     };
-    let Some(chunk) = store.read_chunk(ancestor.level, u64::from(col), u64::from(row))? else {
-        return Ok(Tile::Empty);
-    };
+    Ok(Some(TileRead {
+        selection,
+        ancestor,
+        col: u64::from(col),
+        row: u64::from(row),
+    }))
+}
+
+fn render_chunk(chunk: &Chunk, read: TileRead) -> Result<Tile> {
     if chunk.width == 0 || chunk.width != chunk.height {
         return Err(Error::Format(
             "rendered chunk must have a positive square shape".into(),
         ));
     }
-    let Some(rgba) = pack_data_tile(&chunk, &selection, ancestor)? else {
+    let Some(rgba) = pack_data_tile(chunk, &read.selection, read.ancestor)? else {
         return Ok(Tile::Empty);
     };
     Ok(Tile::Png(encode_rgba(chunk.width, chunk.height, &rgba)?))
+}
+
+/// Renders one XYZ tile from a canonical raster store.
+///
+/// An empty band slice selects the manifest default. One selected band uses
+/// RG16; two or three selected bands use independently normalized RGB8.
+#[cfg(any(feature = "local", feature = "http"))]
+pub fn render_tile(store: &mut RasterStore, tile: TileCoord, bands: &[usize]) -> Result<Tile> {
+    let Some(read) = prepare_tile(store.manifest(), tile, bands)? else {
+        return Ok(Tile::Empty);
+    };
+    let Some(chunk) = store.read_chunk(read.ancestor.level, read.col, read.row)? else {
+        return Ok(Tile::Empty);
+    };
+    render_chunk(&chunk, read)
+}
+
+/// Renders one XYZ tile through the same geometry and packing as the native renderer.
+#[cfg(feature = "async")]
+pub async fn render_async_tile(
+    store: &mut AsyncRasterStore,
+    tile: TileCoord,
+    bands: &[usize],
+) -> Result<Tile> {
+    let Some(read) = prepare_tile(store.manifest(), tile, bands)? else {
+        return Ok(Tile::Empty);
+    };
+    let Some(chunk) = store
+        .read_chunk(read.ancestor.level, read.col, read.row)
+        .await?
+    else {
+        return Ok(Tile::Empty);
+    };
+    render_chunk(&chunk, read)
 }
 
 fn pack_data_tile(

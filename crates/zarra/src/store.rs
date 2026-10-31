@@ -1,19 +1,21 @@
 //! Local and HTTP storage opening with shared root/level validation.
 
 use std::collections::HashMap;
+#[cfg(feature = "local")]
 use std::fs;
+#[cfg(feature = "local")]
 use std::path::Path;
 use std::sync::Arc;
 
-use zarrs::array::ArrayShardedReadableExtCache;
+use zarrs::array::{Array, ArrayShardedReadableExtCache};
+#[cfg(feature = "local")]
 use zarrs::filesystem::FilesystemStore;
 use zarrs::group::{Group, GroupMetadata};
-use zarrs::storage::ReadableStorage;
+use zarrs::storage::{ReadableStorage, ReadableStorageTraits};
 
-use crate::level::DynArray;
-use crate::{Error, LevelMeta, RasterManifest, Result};
+use crate::{Error, LevelMeta, RasterManifest, Result, MAX_CACHED_SHARDS};
 
-const MAX_CACHED_SHARDS: usize = 1024;
+type DynArray = Array<dyn ReadableStorageTraits>;
 
 pub(crate) struct Level {
     pub(crate) array: DynArray,
@@ -30,6 +32,7 @@ pub struct RasterStore {
 
 impl RasterStore {
     /// Opens a local Zarr v3 raster store directory.
+    #[cfg(feature = "local")]
     pub fn open(path: &Path) -> Result<Self> {
         let root = fs::canonicalize(path)?;
         if !fs::metadata(&root)?.is_dir() {
